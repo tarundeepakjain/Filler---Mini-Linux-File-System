@@ -1,0 +1,25 @@
+# Filesystem images & backing storage
+*.img
+*.bin
+
+# Build outputs and object files
+*.o
+*.d
+*.gch
+*.pch
+bin/
+build/
+*.out
+
+# Debug symbols & core dumps
+*.dSYM/
+core
+vgcore.*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE metadata
+.vscode/
+.idea/
