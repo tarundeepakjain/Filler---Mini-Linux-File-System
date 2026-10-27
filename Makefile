@@ -1,4 +1,3 @@
-
 # Compiler and flags
 CXX := g++
 CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -Werror -O2 -g
@@ -15,7 +14,10 @@ SRCS := $(shell find $(SRC_DIR) -name '*.cpp' 2>/dev/null)
 OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
 
-.PHONY: all clean dirs
+# Test configuration
+TEST_BIN := $(BIN_DIR)/block_device_test
+
+.PHONY: all clean dirs test
 
 # Default target
 all: dirs $(BIN_DIR)/filler
@@ -40,11 +42,10 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
 
-.PHONY: test
-
+# Build and run test suite
 test: dirs
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) \
 		src/storage/BlockDevice.cpp \
 		tests/block_device_test.cpp \
-		-o $(BIN_DIR)/block_device_test
-	./$(BIN_DIR)/block_device_test
+		-o $(TEST_BIN)
+	./$(TEST_BIN)
