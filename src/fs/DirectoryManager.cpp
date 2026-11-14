@@ -427,4 +427,84 @@ void DirectoryManager::remove_directory(std::uint64_t parent_inode_id, const std
     write_entries(parent, parent_entries);
 }
 
+void DirectoryManager::add_entry(std::uint64_t parent_inode_id, std::uint64_t inode_id, FileType type, const std::string& name) {
+    if (!device_.is_open()) {
+        throw DirectoryManagerError("Cannot add entry: BlockDevice is not open");
+    }
+
+    if (parent_inode_id >= inode_manager_.superblock().total_inodes) {
+        throw DirectoryManagerError("Invalid parent inode ID: " + std::to_string(parent_inode_id));
+    }
+
+    if (!inode_manager_.is_inode_allocated(parent_inode_id)) {
+        throw DirectoryManagerError("Parent inode is not allocated: " + std::to_string(parent_inode_id));
+    }
+
+    Inode parent = inode_manager_.get_inode(parent_inode_id);
+    if (!parent.is_directory()) {
+        throw DirectoryManagerError("Parent inode " + std::to_string(parent_inode_id) + " is not a directory");
+    }
+
+    if (name.empty()) {
+        throw DirectoryManagerError("Entry name cannot be empty");
+    }
+    if (name == "." || name == "..") {
+        throw DirectoryManagerError("Cannot add entry with reserved name '" + name + "'");
+    }
+    if (name.find('/') != std::string::npos || name.find('\0') != std::string::npos) {
+        throw DirectoryManagerError("Entry name contains invalid characters: " + name);
+    }
+    if (name.size() > 255) {
+        throw DirectoryManagerError("Entry name exceeds maximum length of 255 bytes");
+    }
+
+    std::vector<DirectoryEntry> parent_entries = read_entries(parent);
+    for (const auto& entry : parent_entries) {
+        if (entry.name == name) {
+            throw DirectoryManagerError("Directory entry already exists: " + name);
+        }
+    }
+
+    parent_entries.emplace_back(inode_id, type, name);
+    write_entries(parent, parent_entries);
+}
+
+void DirectoryManager::remove_entry(std::uint64_t parent_inode_id, const std::string& name) {
+    if (!device_.is_open()) {
+        throw DirectoryManagerError("Cannot remove entry: BlockDevice is not open");
+    }
+
+    if (name.empty()) {
+        throw DirectoryManagerError("Entry name cannot be empty");
+    }
+    if (name == "." || name == "..") {
+        throw DirectoryManagerError("Cannot remove '.' or '..'");
+    }
+
+    if (parent_inode_id >= inode_manager_.superblock().total_inodes) {
+        throw DirectoryManagerError("Invalid parent inode ID: " + std::to_string(parent_inode_id));
+    }
+
+    if (!inode_manager_.is_inode_allocated(parent_inode_id)) {
+        throw DirectoryManagerError("Parent inode is not allocated: " + std::to_string(parent_inode_id));
+    }
+
+    Inode parent = inode_manager_.get_inode(parent_inode_id);
+    if (!parent.is_directory()) {
+        throw DirectoryManagerError("Parent inode " + std::to_string(parent_inode_id) + " is not a directory");
+    }
+
+    std::vector<DirectoryEntry> parent_entries = read_entries(parent);
+    auto it = std::find_if(parent_entries.begin(), parent_entries.end(), [&](const DirectoryEntry& e) {
+        return e.name == name;
+    });
+
+    if (it == parent_entries.end()) {
+        throw EntryNotFoundError(name);
+    }
+
+    parent_entries.erase(it);
+    write_entries(parent, parent_entries);
+}
+
 } // namespace filler::fs

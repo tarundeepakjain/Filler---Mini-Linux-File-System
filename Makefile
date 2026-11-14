@@ -21,8 +21,9 @@ TEST_FORMATTER_BIN := $(BIN_DIR)/formatter_test
 TEST_BLOCK_BITMAP_BIN := $(BIN_DIR)/block_bitmap_test
 TEST_INODE_MANAGER_BIN := $(BIN_DIR)/inode_manager_test
 TEST_DIRECTORY_MANAGER_BIN := $(BIN_DIR)/directory_manager_test
+TEST_FILE_MANAGER_BIN := $(BIN_DIR)/file_manager_test
 
-.PHONY: all clean dirs test test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager test_directory_manager
+.PHONY: all clean dirs test test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager test_directory_manager test_file_manager
 
 # Default target
 all: dirs $(BIN_DIR)/filler
@@ -111,5 +112,20 @@ test_directory_manager: dirs
 		-o $(TEST_DIRECTORY_MANAGER_BIN)
 	./$(TEST_DIRECTORY_MANAGER_BIN)
 
+# Build and run file manager test suite
+test_file_manager: dirs
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) \
+		src/storage/BlockDevice.cpp \
+		src/fs/Superblock.cpp \
+		src/fs/Formatter.cpp \
+		src/fs/BlockBitmap.cpp \
+		src/fs/Inode.cpp \
+		src/fs/InodeManager.cpp \
+		src/fs/DirectoryManager.cpp \
+		src/fs/FileManager.cpp \
+		tests/file_manager_test.cpp \
+		-o $(TEST_FILE_MANAGER_BIN)
+	./$(TEST_FILE_MANAGER_BIN)
+
 # Run all test suites
-test: test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager test_directory_manager
+test: test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager test_directory_manager test_file_manager

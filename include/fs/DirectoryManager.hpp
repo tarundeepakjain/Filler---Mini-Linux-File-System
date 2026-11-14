@@ -72,6 +72,12 @@ public:
     // Rejects root directory removal and non-empty directory removal.
     void remove_directory(std::uint64_t parent_inode_id, const std::string& name);
 
+    // Adds a directory entry (regular file or directory) to parent_inode_id.
+    void add_entry(std::uint64_t parent_inode_id, std::uint64_t inode_id, FileType type, const std::string& name);
+
+    // Removes an entry from parent_inode_id by name.
+    void remove_entry(std::uint64_t parent_inode_id, const std::string& name);
+
     // Accessors
     [[nodiscard]] filler::fs::InodeManager& inode_manager() noexcept { return inode_manager_; }
     [[nodiscard]] filler::fs::BlockBitmap& block_bitmap() noexcept { return block_bitmap_; }
