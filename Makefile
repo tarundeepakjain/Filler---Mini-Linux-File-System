@@ -19,8 +19,9 @@ TEST_BLOCK_DEVICE_BIN := $(BIN_DIR)/block_device_test
 TEST_SUPERBLOCK_BIN := $(BIN_DIR)/superblock_test
 TEST_FORMATTER_BIN := $(BIN_DIR)/formatter_test
 TEST_BLOCK_BITMAP_BIN := $(BIN_DIR)/block_bitmap_test
+TEST_INODE_MANAGER_BIN := $(BIN_DIR)/inode_manager_test
 
-.PHONY: all clean dirs test test_block_device test_superblock test_formatter test_block_bitmap
+.PHONY: all clean dirs test test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager
 
 # Default target
 all: dirs $(BIN_DIR)/filler
@@ -83,5 +84,17 @@ test_block_bitmap: dirs
 		-o $(TEST_BLOCK_BITMAP_BIN)
 	./$(TEST_BLOCK_BITMAP_BIN)
 
+# Build and run inode manager test suite
+test_inode_manager: dirs
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) \
+		src/storage/BlockDevice.cpp \
+		src/fs/Superblock.cpp \
+		src/fs/Formatter.cpp \
+		src/fs/Inode.cpp \
+		src/fs/InodeManager.cpp \
+		tests/inode_manager_test.cpp \
+		-o $(TEST_INODE_MANAGER_BIN)
+	./$(TEST_INODE_MANAGER_BIN)
+
 # Run all test suites
-test: test_block_device test_superblock test_formatter test_block_bitmap
+test: test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager
