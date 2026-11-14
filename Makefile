@@ -17,8 +17,9 @@ DEPS := $(OBJS:.o=.d)
 # Test binaries
 TEST_BLOCK_DEVICE_BIN := $(BIN_DIR)/block_device_test
 TEST_SUPERBLOCK_BIN := $(BIN_DIR)/superblock_test
+TEST_FORMATTER_BIN := $(BIN_DIR)/formatter_test
 
-.PHONY: all clean dirs test test_block_device test_superblock
+.PHONY: all clean dirs test test_block_device test_superblock test_formatter
 
 # Default target
 all: dirs $(BIN_DIR)/filler
@@ -60,5 +61,15 @@ test_superblock: dirs
 		-o $(TEST_SUPERBLOCK_BIN)
 	./$(TEST_SUPERBLOCK_BIN)
 
+# Build and run formatter test suite
+test_formatter: dirs
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) \
+		src/storage/BlockDevice.cpp \
+		src/fs/Superblock.cpp \
+		src/fs/Formatter.cpp \
+		tests/formatter_test.cpp \
+		-o $(TEST_FORMATTER_BIN)
+	./$(TEST_FORMATTER_BIN)
+
 # Run all test suites
-test: test_block_device test_superblock
+test: test_block_device test_superblock test_formatter
