@@ -18,8 +18,9 @@ DEPS := $(OBJS:.o=.d)
 TEST_BLOCK_DEVICE_BIN := $(BIN_DIR)/block_device_test
 TEST_SUPERBLOCK_BIN := $(BIN_DIR)/superblock_test
 TEST_FORMATTER_BIN := $(BIN_DIR)/formatter_test
+TEST_BLOCK_BITMAP_BIN := $(BIN_DIR)/block_bitmap_test
 
-.PHONY: all clean dirs test test_block_device test_superblock test_formatter
+.PHONY: all clean dirs test test_block_device test_superblock test_formatter test_block_bitmap
 
 # Default target
 all: dirs $(BIN_DIR)/filler
@@ -71,5 +72,16 @@ test_formatter: dirs
 		-o $(TEST_FORMATTER_BIN)
 	./$(TEST_FORMATTER_BIN)
 
+# Build and run block bitmap test suite
+test_block_bitmap: dirs
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) \
+		src/storage/BlockDevice.cpp \
+		src/fs/Superblock.cpp \
+		src/fs/Formatter.cpp \
+		src/fs/BlockBitmap.cpp \
+		tests/block_bitmap_test.cpp \
+		-o $(TEST_BLOCK_BITMAP_BIN)
+	./$(TEST_BLOCK_BITMAP_BIN)
+
 # Run all test suites
-test: test_block_device test_superblock test_formatter
+test: test_block_device test_superblock test_formatter test_block_bitmap
