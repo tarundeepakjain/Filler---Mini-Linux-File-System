@@ -13,8 +13,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -22,6 +25,12 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <sys/param.h>
+#include <sys/ucred.h>
+#include <sys/mount.h>
+#endif
 
 namespace filler::cli {
 
@@ -176,6 +185,94 @@ bool parse_write_args(const std::string& args, std::string& path_out, bool& has_
     path_out = path;
     text_out = process_text_argument(raw_text);
     return true;
+}
+
+bool check_device_mounted(const std::string& dev_path, std::string& mount_point_out, bool& is_system_root_out) {
+    is_system_root_out = false;
+    mount_point_out.clear();
+
+    char real_dev[PATH_MAX];
+    std::string canonical_dev = dev_path;
+    if (::realpath(dev_path.c_str(), real_dev) != nullptr) {
+        canonical_dev = real_dev;
+    }
+
+#if defined(__linux__)
+    std::ifstream mounts_file("/proc/mounts");
+    if (!mounts_file.is_open()) {
+        mounts_file.open("/etc/mtab");
+    }
+    if (mounts_file.is_open()) {
+        std::string line;
+        while (std::getline(mounts_file, line)) {
+            if (line.empty() || line[0] == '#') {
+                continue;
+            }
+            std::istringstream iss(line);
+            std::string mnt_dev, mnt_point;
+            if (iss >> mnt_dev >> mnt_point) {
+                char real_mnt_dev[PATH_MAX];
+                std::string canonical_mnt_dev = mnt_dev;
+                if (::realpath(mnt_dev.c_str(), real_mnt_dev) != nullptr) {
+                    canonical_mnt_dev = real_mnt_dev;
+                }
+
+                bool matches = false;
+                if (canonical_mnt_dev == canonical_dev || mnt_dev == dev_path) {
+                    matches = true;
+                } else if (canonical_mnt_dev.rfind(canonical_dev, 0) == 0) {
+                    std::string suffix = canonical_mnt_dev.substr(canonical_dev.length());
+                    if (!suffix.empty() && (std::isdigit(static_cast<unsigned char>(suffix[0])) ||
+                                            (suffix[0] == 'p' && suffix.length() > 1 && std::isdigit(static_cast<unsigned char>(suffix[1]))))) {
+                        matches = true;
+                    }
+                }
+
+                if (matches) {
+                    mount_point_out = mnt_point;
+                    if (mnt_point == "/") {
+                        is_system_root_out = true;
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+#elif defined(__APPLE__)
+    struct statfs* mounts = nullptr;
+    int num_mounts = getmntinfo(&mounts, MNT_NOWAIT);
+    if (num_mounts > 0 && mounts != nullptr) {
+        for (int i = 0; i < num_mounts; ++i) {
+            std::string mnt_dev = mounts[i].f_mntfromname;
+            std::string mnt_point = mounts[i].f_mntonname;
+
+            char real_mnt_dev[PATH_MAX];
+            std::string canonical_mnt_dev = mnt_dev;
+            if (::realpath(mnt_dev.c_str(), real_mnt_dev) != nullptr) {
+                canonical_mnt_dev = real_mnt_dev;
+            }
+
+            bool matches = false;
+            if (canonical_mnt_dev == canonical_dev || mnt_dev == dev_path) {
+                matches = true;
+            } else if (canonical_mnt_dev.rfind(canonical_dev, 0) == 0) {
+                std::string suffix = canonical_mnt_dev.substr(canonical_dev.length());
+                if (!suffix.empty() && (suffix[0] == 's' || std::isdigit(static_cast<unsigned char>(suffix[0])))) {
+                    matches = true;
+                }
+            }
+
+            if (matches) {
+                mount_point_out = mnt_point;
+                if (mnt_point == "/") {
+                    is_system_root_out = true;
+                }
+                return true;
+            }
+        }
+    }
+#endif
+    return false;
 }
 
 } // namespace
@@ -348,24 +445,82 @@ void Shell::init_subsystems() {
 }
 
 void Shell::format_filesystem(std::ostream& out) {
-    if (!device_ || device_->total_blocks() != filler::fs::Formatter::DEFAULT_TOTAL_BLOCKS) {
-        if (device_) {
-            device_->close();
+    std::istream& in_stream = (input_stream_ != nullptr) ? *input_stream_ : std::cin;
+    format_filesystem(out, in_stream, false);
+}
+
+void Shell::format_filesystem(std::ostream& out, std::istream& in, bool skip_confirmation) {
+    if (!device_ || !device_->is_open()) {
+        try {
+            device_ = std::make_unique<filler::storage::BlockDevice>(image_path_);
+        } catch (const std::exception& ex) {
+            out << "Error: Storage device is not open: " << ex.what() << "\n";
+            return;
         }
-        int fd = ::open(image_path_.c_str(), O_RDWR);
-        if (fd < 0) {
-            throw std::system_error(errno, std::generic_category(), "Failed to open disk image: " + image_path_);
-        }
-        if (::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE)) != 0) {
-            int err = errno;
-            ::close(fd);
-            throw std::system_error(err, std::generic_category(), "Failed to resize disk image: " + image_path_);
-        }
-        ::close(fd);
-        device_ = std::make_unique<filler::storage::BlockDevice>(image_path_);
     }
 
-    filler::fs::Formatter::format(*device_);
+    if (device_->is_block_device()) {
+        std::string mount_point;
+        bool is_system_root = false;
+        if (check_device_mounted(device_->path(), mount_point, is_system_root)) {
+            if (is_system_root) {
+                out << "Error: Refusing to format system root disk: " << device_->path() << "\n";
+                return;
+            }
+            out << "Error: Device " << device_->path()
+                << " (or partition) is currently mounted at '" << mount_point
+                << "'. Please unmount it before formatting.\n";
+            return;
+        }
+
+        if (!skip_confirmation) {
+            const double gib = static_cast<double>(device_->size_bytes()) / (1024.0 * 1024.0 * 1024.0);
+            out << "WARNING: Target is a physical block device: " << device_->path() << "\n";
+            out << "Detected capacity: " << device_->size_bytes() << " bytes ("
+                << device_->total_blocks() << " blocks, "
+                << std::fixed << std::setprecision(2) << gib << " GiB)\n";
+            out << "All existing data and partitions on this device will be PERMANENTLY DESTROYED!\n";
+            out << "Type 'YES' to confirm destructive formatting: " << std::flush;
+            std::string confirmation;
+            if (!std::getline(in, confirmation)) {
+                out << "Formatting cancelled.\n";
+                return;
+            }
+            std::string trimmed = confirmation;
+            while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front()))) {
+                trimmed.erase(trimmed.begin());
+            }
+            while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back()))) {
+                trimmed.pop_back();
+            }
+            if (trimmed != "YES") {
+                out << "Formatting cancelled.\n";
+                return;
+            }
+        }
+    } else {
+        // Regular file: if smaller than standard 64 MiB, expand it
+        if (device_->total_blocks() < filler::fs::Formatter::DEFAULT_TOTAL_BLOCKS) {
+            device_->close();
+            int fd = ::open(image_path_.c_str(), O_RDWR);
+            if (fd < 0) {
+                throw std::system_error(errno, std::generic_category(), "Failed to open disk image: " + image_path_);
+            }
+            if (::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE)) != 0) {
+                int err = errno;
+                ::close(fd);
+                throw std::system_error(err, std::generic_category(), "Failed to resize disk image: " + image_path_);
+            }
+            ::close(fd);
+            device_ = std::make_unique<filler::storage::BlockDevice>(image_path_);
+        }
+    }
+
+    const std::uint64_t total_blocks = device_->total_blocks();
+    const std::uint64_t inodes = filler::fs::Formatter::calculate_default_inodes(total_blocks);
+    const bool enforce_standard = !device_->is_block_device() && (total_blocks == filler::fs::Formatter::DEFAULT_TOTAL_BLOCKS);
+
+    filler::fs::Formatter::format(*device_, inodes, enforce_standard);
     init_subsystems();
     directory_manager_->initialize_root();
     inspect_filesystem();
@@ -461,7 +616,8 @@ std::pair<std::string, std::string> Shell::split_path(const std::string& path) {
 }
 
 void Shell::cmd_format(std::ostream& out) {
-    format_filesystem(out);
+    std::istream& in_stream = (input_stream_ != nullptr) ? *input_stream_ : std::cin;
+    format_filesystem(out, in_stream, false);
 }
 
 void Shell::cmd_pwd(std::ostream& out) {
@@ -837,6 +993,7 @@ bool Shell::execute_command(const std::string& cmd_line, std::ostream& out) {
 }
 
 void Shell::run(std::istream& in, std::ostream& out) {
+    input_stream_ = &in;
     std::string line;
     while (true) {
         out << "filler:" << current_path_ << "> " << std::flush;
@@ -847,6 +1004,7 @@ void Shell::run(std::istream& in, std::ostream& out) {
             break;
         }
     }
+    input_stream_ = nullptr;
 }
 
 } // namespace filler::cli

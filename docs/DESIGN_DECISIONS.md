@@ -236,3 +236,32 @@ This document provides a comprehensive log of the major architectural and engine
   - FUSE hides the command dispatching, path resolution, and shell mechanics that are vital topics in Operating Systems education.
 - **Classification**: Scope boundary.
 
+---
+
+## 18. Physical USB Storage Support & Destructive Safety Guardrails
+
+- **Decision**: Extend `BlockDevice` to operate transparently on both regular files and raw Linux/macOS block devices (e.g. `/dev/sdb` for an HP 16 GB USB flash drive), with strict safety guardrails.
+- **Rationale**:
+  - Educational systems are vastly more impactful when students can see their code interact directly with real physical hardware plugged into a USB port.
+  - Interacting with physical block devices carries real risk of overwriting host operating system disks (e.g. `/dev/sda` or system partitions).
+- **Implemented Guardrails**:
+  1. **Device Capacity Detection**: Uses `ioctl(fd, BLKGETSIZE64, &bytes)` on Linux and `DKIOCGETBLOCKCOUNT` on macOS, correctly discovering physical geometry where `fstat().st_size` reports 0.
+  2. **Active Mount Protection**: Inspects `/proc/mounts`, `/etc/mtab`, or `getmntinfo`. If the target block device or any of its partitions (e.g. `/dev/sdb1`) is mounted anywhere, formatting is refused until cleanly unmounted.
+  3. **System Root Protection**: Explicitly detects if the device is mounted at `/` (root), immediately aborting with an unbypassable error.
+  4. **Mandatory Confirmation**: Formatting a physical device requires explicit user input typing `"YES"` in all capitals.
+- **Classification**: High-impact functionality expansion with production-grade safety.
+
+---
+
+## 19. Scalable Inode Allocation Policy: 1 Inode per 256 KiB Ratio
+
+- **Decision**: Replace hardcoded 256-inode assumptions with a dynamic scaling formula: \(I = \max(256, T / 64)\) aligned to 16 inodes, providing 1 inode per 256 KiB of storage capacity.
+- **Rationale**:
+  - The fixed 64 MiB configuration had 256 inodes for 16,384 blocks (\(16384 / 64 = 256\)), establishing an exact 1:64 ratio.
+  - Scaling this ratio linearly ensures 100% backward compatibility for 64 MiB images (exactly 256 inodes).
+  - For a 16 GB USB flash drive, this allocates ~61,040 inodes occupying only 3,815 blocks (~15.2 MiB), representing just **0.1% metadata overhead** while leaving **99.9% of the flash drive available for user data**.
+- **Alternatives Considered**:
+  - *ext4 standard ratio (1 inode per 16 KiB)*: Would consume \(\approx 1\) million inodes (\(\approx 250\) MiB of inode tables) on a 16 GB drive. For an educational mini filesystem, 60,000 files is more than sufficient and saves significant format time and RAM.
+  - *Fully dynamic B-tree inodes (XFS/Btrfs)*: Far too complex, requiring balanced trees on disk.
+- **Classification**: Balanced engineering optimization.
+

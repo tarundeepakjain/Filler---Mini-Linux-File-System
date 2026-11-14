@@ -27,16 +27,26 @@ public:
     static constexpr std::uint64_t DEFAULT_TOTAL_BLOCKS = 16384;
     static constexpr std::uint64_t DEFAULT_TOTAL_INODES = 256;
 
+    // Calculates default inode count scaling with capacity (1 inode per 256 KiB, min 256, multiple of 16)
+    static std::uint64_t calculate_default_inodes(std::uint64_t total_blocks) noexcept {
+        if (total_blocks <= DEFAULT_TOTAL_BLOCKS) {
+            return DEFAULT_TOTAL_INODES;
+        }
+        std::uint64_t inodes = std::max<std::uint64_t>(DEFAULT_TOTAL_INODES, total_blocks / 64ULL);
+        return ((inodes + 15ULL) / 16ULL) * 16ULL;
+    }
+
     // Constructs a formatter targeting an existing BlockDevice.
     explicit Formatter(filler::storage::BlockDevice& device,
                        bool enforce_standard_size = true);
 
     // Formats the underlying BlockDevice and returns the created Superblock.
-    Superblock format(std::uint64_t total_inodes = DEFAULT_TOTAL_INODES);
+    // If total_inodes == 0, calculates default inodes based on capacity.
+    Superblock format(std::uint64_t total_inodes = 0);
 
     // Static convenience method that formats the given BlockDevice.
     static Superblock format(filler::storage::BlockDevice& device,
-                             std::uint64_t total_inodes = DEFAULT_TOTAL_INODES,
+                             std::uint64_t total_inodes = 0,
                              bool enforce_standard_size = true);
 
 private:

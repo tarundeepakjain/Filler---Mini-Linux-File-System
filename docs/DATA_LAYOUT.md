@@ -343,3 +343,55 @@ Filler guarantees full portability across CPU architectures by enforcing strict 
   - Serialized byte-by-byte for all 8 bytes (`val >> (i * 8)`).
 - Never casts raw memory structs directly to or from disk buffers. This avoids compiler structure-packing discrepancies, padding anomalies, and big-endian CPU incompatibilities.
 
+---
+
+## 7. Dynamic Storage Sizing & Physical USB Drive Layout Scaling
+
+While the classic reference disk image size is 64 MiB, Filler dynamically computes metadata regions and bitmap block allocations for any arbitrary capacity—from small images up to multi-gigabyte USB flash drives (such as an HP 16 GB USB drive).
+
+### 7.1 Layout Mathematical Formulas
+Given total blocks \(T = \text{capacity\_bytes} / 4096\):
+1. **Block Bitmap Blocks**:
+   \[
+   B_{\text{bm}} = \left\lceil \frac{T}{32,768} \right\rceil
+   \]
+   (Each 4096-byte bitmap block tracks 32,768 storage blocks).
+2. **Inode Scaling Policy**:
+   \[
+   I_{\text{target}} = \max\left(256, \left\lfloor \frac{T}{64} \right\rfloor\right)
+   \]
+   Rounded up to the nearest multiple of 16 (matching 16 inodes per 4096-byte block):
+   \[
+   I_{\text{total}} = \left\lceil \frac{I_{\text{target}}}{16} \right\rceil \times 16
+   \]
+3. **Inode Bitmap Blocks**:
+   \[
+   I_{\text{bm}} = \left\lceil \frac{I_{\text{total}}}{32,768} \right\rceil
+   \]
+4. **Inode Table Blocks**:
+   \[
+   I_{\text{tbl}} = \frac{I_{\text{total}}}{16}
+   \]
+5. **Data Region Boundary**:
+   \[
+   D_{\text{start}} = 1 + B_{\text{bm}} + I_{\text{bm}} + I_{\text{tbl}}
+   \]
+   \[
+   D_{\text{blocks}} = T - D_{\text{start}}
+   \]
+
+### 7.2 Layout Across Target Capacities
+
+| Parameter | Standard 64 MiB Image | 256 MiB Sparse Image | 1 GiB Sparse Image | 4 GiB Sparse Image | HP 16 GB Physical USB Drive |
+|---|---:|---:|---:|---:|---:|
+| **Capacity (Bytes)** | 67,108,864 B | 268,435,456 B | 1,073,741,824 B | 4,294,967,296 B | 16,000,000,000 B |
+| **Total Blocks** | 16,384 | 65,536 | 262,144 | 1,048,576 | 3,906,250 |
+| **Total Inodes** | 256 | 1,024 | 4,096 | 16,384 | 61,040 |
+| **Block Bitmap Blocks** | 1 (Blk 1) | 2 (Blk 1–2) | 8 (Blk 1–8) | 32 (Blk 1–32) | 120 (Blk 1–120) |
+| **Inode Bitmap Blocks** | 1 (Blk 2) | 1 (Blk 3) | 1 (Blk 9) | 1 (Blk 33) | 2 (Blk 121–122) |
+| **Inode Table Blocks** | 16 (Blk 3–18) | 64 (Blk 4–67) | 256 (Blk 10–265) | 1,024 (Blk 34–1,057) | 3,815 (Blk 123–3,937) |
+| **Metadata Total Blocks**| 19 blocks | 68 blocks | 266 blocks | 1,058 blocks | 3,938 blocks (\(\approx 15.38\) MiB) |
+| **Data Region Start** | Block 19 | Block 68 | Block 266 | Block 1,058 | Block 3,938 |
+| **Data Region Blocks** | 16,365 | 65,468 | 261,878 | 1,047,518 | 3,902,312 (\(\approx 14.88\) GiB) |
+| **Metadata Space Ratio** | 0.12% | 0.10% | 0.10% | 0.10% | 0.10% |
+

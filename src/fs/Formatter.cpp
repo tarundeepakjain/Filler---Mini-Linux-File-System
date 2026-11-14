@@ -28,6 +28,10 @@ Superblock Formatter::format(std::uint64_t total_inodes) {
                              std::to_string(device_.size_bytes()) + " bytes)");
     }
 
+    if (total_inodes == 0) {
+        total_inodes = calculate_default_inodes(device_.total_blocks());
+    }
+
     // Generate Superblock with disk layout calculated by create_default()
     Superblock sb = Superblock::create_default(device_.total_blocks(), total_inodes);
 

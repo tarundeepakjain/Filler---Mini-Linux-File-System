@@ -1,12 +1,13 @@
 # Filler – Custom Userspace Mini File System
 
 [![Language: C++17](https://img.shields.io/badge/Language-C%2B%2B17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
-[![Build & Tests](https://img.shields.io/badge/Tests-113%2F113%20Passed-brightgreen.svg)](docs/TESTING.md)
+[![Build & Tests](https://img.shields.io/badge/Tests-118%2F118%20Passed-brightgreen.svg)](docs/TESTING.md)
+[![Storage: Files & USB Devices](https://img.shields.io/badge/Storage-Images%20%26%20Physical%20USB-blueviolet.svg)](#)
 [![License: Educational](https://img.shields.io/badge/License-Educational-orange.svg)](#)
 
-**Filler** is a fully functional, highly reliable userspace file system written in ISO C++17. It manages a virtual 64 MiB binary disk image using classic Unix filesystem principles: a centralized Superblock, dedicated block and inode allocation bitmaps, a fixed-size Inode Table, hierarchical directory indexing, and multi-level indirect block addressing.
+**Filler** is a fully functional, highly reliable userspace file system written in ISO C++17. It operates seamlessly on both **virtual disk image files** (from 64 MiB up to multi-gigabytes) and **physical USB block devices** (such as an HP 16 GB USB flash drive) using classic Unix filesystem principles: a centralized Superblock, dynamic multi-block allocation bitmaps, a scalable Inode Table, hierarchical directory indexing, and multi-level indirect block addressing.
 
-Filler runs entirely in user space and features its own interactive UNIX-like shell REPL, enabling deep study of operating system storage algorithms without the risk of host kernel crashes.
+Filler runs entirely in user space and features its own interactive UNIX-like shell REPL, enabling deep study of operating system storage algorithms on real storage hardware without the risk of host kernel crashes.
 
 ---
 
@@ -212,15 +213,120 @@ This builds the binary at `bin/filler`.
 ```bash
 make test
 ```
-Runs all 9 test suites (113 tests). Every test must pass with 0 failures.
+Runs all 9 test suites (118 tests). Every test must pass with 0 failures:
+- `test_block_device`: 21 tests (including 64-bit offsets, properties, 4 GiB sparse device)
+- `test_superblock`: 14 tests
+- `test_formatter`: 9 tests
+- `test_block_bitmap`: 13 tests
+- `test_inode_manager`: 12 tests
+- `test_directory_manager`: 15 tests
+- `test_file_manager`: 14 tests
+- `test_cli`: 11 tests
+- `test_integration`: 9 tests (including 256 MiB, 1 GiB, 4 GiB sparse volume scaling and safety checks)
 
-### 3. Launch the Interactive Shell
+### 3. Launching Filler
+
+#### Option A: Virtual Disk Image
 ```bash
-# Launch with default disk image (filler.img)
+# Launch with default 64 MiB disk image (filler.img)
 make run
 
-# Alternatively, specify a custom disk image:
+# Or target a specific image file (creates file if not present):
 ./bin/filler my_disk.img
+
+# Format an image directly before launching:
+./bin/filler --format my_disk.img
+```
+
+#### Option B: Physical USB Flash Drive (e.g. HP 16 GB USB Drive)
+When targeting a physical Linux block device, run with `sudo` (required for raw block device I/O):
+```bash
+# Open physical drive (inspects existing filesystem without formatting):
+sudo ./bin/filler /dev/sdb
+
+# Or format the drive with safety confirmation before entering the shell:
+sudo ./bin/filler --format /dev/sdb
+```
+
+---
+
+### Step-by-Step Guide: Testing HP 16 GB USB Flash Drive on Linux VM (UTM on macOS)
+
+To safely test Filler on a physical USB flash drive within a virtualized Linux environment (e.g. Ubuntu running under UTM on Apple Silicon or Intel Mac):
+
+#### Step 1: Connect USB Drive to Host & Pass Through to UTM
+1. Insert your **HP 16 GB USB drive** into your Mac.
+2. In UTM, start your Linux Virtual Machine.
+3. In the UTM VM window toolbar at top right, click the **USB icon** (USB Devices).
+4. Select the **HP USB Flash Drive** from the list to redirect it directly into the Linux guest VM.
+5. macOS will disconnect the drive and pass raw USB hardware access to the Linux guest.
+
+#### Step 2: Identify the Device Node in Linux
+Inside the Linux terminal, run:
+```bash
+lsblk
+```
+Look for your 16 GB drive. It will typically appear as `/dev/sdb` (or `/dev/sdc` if you have secondary virtual disks):
+```text
+NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+sda      8:0    0    64G  0 disk 
+├─sda1   8:1    0     1G  0 part /boot
+└─sda2   8:2    0    63G  0 part /
+sdb      8:16   1  14.9G  0 disk 
+└─sdb1   8:17   1  14.9G  0 part /media/user/HP_USB
+```
+
+#### Step 3: Ensure Partitions are Unmounted
+Filler contains built-in safety protection that refuses to format mounted devices. If your desktop environment auto-mounted the drive, unmount it:
+```bash
+sudo umount /dev/sdb*
+```
+
+#### Step 4: Run Filler with Destructive Format Safeguard
+Launch Filler targeting the raw physical drive:
+```bash
+sudo ./bin/filler --format /dev/sdb
+```
+Filler will detect the hardware, query capacity via `ioctl(BLKGETSIZE64)`, inspect `/proc/mounts`, and display a confirmation prompt:
+```text
+WARNING: Target is a physical block device: /dev/sdb
+Detected capacity: 16000000000 bytes (3906250 blocks, 14.90 GiB)
+All existing data and partitions on this device will be PERMANENTLY DESTROYED!
+Type 'YES' to confirm destructive formatting: 
+```
+Type `YES` and press Enter:
+```text
+Filesystem successfully formatted.
+Filler Mini File System Shell (block device: /dev/sdb, 14.90 GiB)
+Type 'help' for available commands or 'exit' to quit.
+filler:/> 
+```
+
+#### Step 5: Perform Filesystem Operations on Physical Hardware
+```text
+filler:/> mkdir photos
+filler:/> cd photos
+filler:/photos> touch info.txt
+filler:/photos> write info.txt "Stored on physical HP 16 GB USB Drive!"
+filler:/photos> cat info.txt
+Stored on physical HP 16 GB USB Drive!
+filler:/photos> stat info.txt
+filler:/photos> exit
+```
+
+#### Step 6: Verify Persistence Across Reconnect
+Run without `--format`:
+```bash
+sudo ./bin/filler /dev/sdb
+```
+Filler will instantly detect the valid Superblock, load the bitmaps, and mount the filesystem:
+```text
+Filler Mini File System Shell (block device: /dev/sdb, 14.90 GiB)
+Type 'help' for available commands or 'exit' to quit.
+filler:/> ls photos
+[FILE] info.txt (39 bytes)
+filler:/> cat photos/info.txt
+Stored on physical HP 16 GB USB Drive!
 ```
 
 ---

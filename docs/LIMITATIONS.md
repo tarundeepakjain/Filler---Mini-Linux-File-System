@@ -34,17 +34,17 @@ This document provides a candid, technically rigorous assessment of the architec
 
 ---
 
-## 3. Capacity & Layout Limitations
+## 3. Capacity & Layout Details
 
-### 3.1 Fixed Inode Table Capacity (256 Inodes)
-- **The Limitation**: The filesystem can store at most 254 user files and directories (Inodes 0 and 1 are reserved). Once 254 inodes are exhausted, creating new files fails with `NoFreeInodesError`, even if tens of megabytes of free space remain in the data region.
-- **Why It Exists**: The Inode Table is statically sized at 16 blocks (65,536 bytes) during formatting to maintain a simple, predictable layout without dynamic B-trees.
-- **Roadmap to Address**: Support variable formatting options (`filler -N 1024`) or implement dynamic inode allocation where inodes are allocated from the data region on demand.
+### 3.1 Dynamic Capacity & Inode Scaling (Implemented)
+- **Status: Implemented**: Filler now dynamically calculates volume geometry, bitmap block counts, and scalable Inode tables for arbitrary device capacities—from 64 MiB up to multi-gigabyte disks and physical USB flash drives (such as an HP 16 GB USB drive).
+- **Default Scaling**: Allocates 1 inode per 256 KiB of storage capacity (\(I = \max(256, T / 64)\) rounded to 16 inodes). For a 16 GB flash drive, this provisions ~61,040 inodes while keeping metadata overhead below 0.1%.
+- **Future Enhancement**: Allow user-specified inode densities via CLI arguments (e.g. `--inodes <count>` or `-i <bytes-per-inode>`).
 
-### 3.2 Fixed Volume Size (64 MiB Geometry)
-- **The Limitation**: Filler expects an exact 64 MiB (16,384 blocks) image layout. It cannot format or mount 1 GiB or 100 GiB disks.
-- **Why It Exists**: Simplifies calculations, bounds checking, and ensures deterministic test behavior.
-- **Roadmap to Address**: Generalize `Formatter::format()` and `Superblock::create_default()` to compute bitmap blocks and inode table blocks dynamically based on `device.size_bytes()`.
+### 3.2 Physical Storage & Flash Memory Considerations
+- **Flash Translation Layer (FTL)**: Physical USB drives use NAND flash memory. While wear leveling and bad-block remapping are handled internally by the USB drive's hardware microcontroller (FTL), Filler performs direct 4096-byte block I/O without host write caching.
+- **No TRIM / Discard Support**: When files or blocks are freed in Filler, the bitmap bits are cleared, but no `ioctl(BLKDISCARD)` command is sent to the physical USB flash drive to notify the FTL that blocks are no longer in use.
+- **Roadmap to Address**: Issue `BLKDISCARD` ioctls when freeing large contiguous extents on SSDs or flash drives supporting discard.
 
 ### 3.3 Directory Capacity Limit (64 KiB / 16 Direct Blocks)
 - **The Limitation**: A directory in Filler can only allocate up to 16 direct blocks (`65,536` bytes). It does not use indirect pointers.

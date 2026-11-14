@@ -10,16 +10,16 @@ Every layer of Filler is independently verified by a dedicated standalone test b
 
 | # | Test Suite | Binary Target | Source File | Test Count | Status |
 |---|---|---|---|---:|:---:|
-| 1 | **BlockDevice Test Suite** | `bin/block_device_test` | `tests/block_device_test.cpp` | 19 | **19 / 19 PASS** |
+| 1 | **BlockDevice Test Suite** | `bin/block_device_test` | `tests/block_device_test.cpp` | 21 | **21 / 21 PASS** |
 | 2 | **Superblock Test Suite** | `bin/superblock_test` | `tests/superblock_test.cpp` | 14 | **14 / 14 PASS** |
-| 3 | **Formatter Test Suite** | `bin/formatter_test` | `tests/formatter_test.cpp` | 8 | **8 / 8 PASS** |
+| 3 | **Formatter Test Suite** | `bin/formatter_test` | `tests/formatter_test.cpp` | 9 | **9 / 9 PASS** |
 | 4 | **BlockBitmap Test Suite** | `bin/block_bitmap_test` | `tests/block_bitmap_test.cpp` | 13 | **13 / 13 PASS** |
 | 5 | **InodeManager Test Suite** | `bin/inode_manager_test` | `tests/inode_manager_test.cpp` | 12 | **12 / 12 PASS** |
 | 6 | **DirectoryManager Test Suite** | `bin/directory_manager_test` | `tests/directory_manager_test.cpp` | 15 | **15 / 15 PASS** |
 | 7 | **FileManager Test Suite** | `bin/file_manager_test` | `tests/file_manager_test.cpp` | 14 | **14 / 14 PASS** |
 | 8 | **Shell CLI Test Suite** | `bin/cli_test` | `tests/cli_test.cpp` | 11 | **11 / 11 PASS** |
-| 9 | **End-to-End Integration Suite**| `bin/integration_test` | `tests/integration_test.cpp` | 7 | **7 / 7 PASS** |
-| **Total** | | | | **113** | **113 / 113 PASS (0 FAIL)** |
+| 9 | **End-to-End Integration Suite**| `bin/integration_test` | `tests/integration_test.cpp` | 9 | **9 / 9 PASS** |
+| **Total** | | | | **118** | **118 / 118 PASS (0 FAIL)** |
 
 ---
 
@@ -60,6 +60,8 @@ make test_integration         # Full E2E Scenarios A through F
   - Boundary block operations at `total_blocks - 1` (Block 16,383).
   - Move construction and move assignment semantics.
   - RAII file descriptor cleanup upon destruction.
+  - Storage properties introspection: verifying `is_block_device()` and `path()`.
+  - Multi-gigabyte sparse device handling: verified 4 GiB capacity (1,048,576 blocks) read/write/persistence at boundary blocks.
 
 ### 3.2 Superblock Test Suite (`tests/superblock_test.cpp`)
 - **Focus**: Verifies 120-byte serialization, deserialization, and structural invariant validation.
@@ -152,6 +154,8 @@ make test_integration         # Full E2E Scenarios A through F
 - **Scenario E: Resource Management**: Allocate large files, delete them, verify block and inode counts return to baseline.
 - **Scenario F: Invalid Operations**: Rejection of path traversal out of bounds, duplicate creation, deleting non-empty directories.
 - **Data Integrity & Consistency**: Bit-by-bit comparison of 100 KiB pseudorandom file content written and read back.
+- **Scenario G: Dynamic Capacity (256M, 1G, 4G)**: Validates dynamic geometry calculations, metadata offsets, multi-block file I/O, and cross-session persistence across 256 MiB, 1 GiB, and 4 GiB volumes.
+- **Scenario H: Block Device Safety & Properties**: Verifies `is_block_device()` detection on regular files, format confirmation safety, and mount guardrails.
 
 ---
 

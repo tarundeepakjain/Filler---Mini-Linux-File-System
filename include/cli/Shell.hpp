@@ -43,9 +43,11 @@ public:
 
     // Explicitly formats the filesystem and initializes root directory.
     void format_filesystem(std::ostream& out);
+    void format_filesystem(std::ostream& out, std::istream& in, bool skip_confirmation = false);
 
     // Accessors
     [[nodiscard]] bool is_formatted() const noexcept { return is_formatted_; }
+    [[nodiscard]] bool is_block_device() const noexcept { return device_ ? device_->is_block_device() : false; }
     [[nodiscard]] FilesystemState filesystem_state() const noexcept { return fs_state_; }
     [[nodiscard]] const std::string& status_message() const noexcept { return status_message_; }
     [[nodiscard]] std::uint64_t current_dir_inode() const noexcept { return current_dir_inode_; }
@@ -72,6 +74,7 @@ private:
     std::string status_message_{"Filesystem is unformatted. Run 'format' to initialize."};
     std::uint64_t current_dir_inode_{1};
     std::string current_path_{"/"};
+    std::istream* input_stream_{nullptr};
 
     void inspect_filesystem();
     void init_subsystems();

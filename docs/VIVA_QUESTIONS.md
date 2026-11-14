@@ -337,3 +337,38 @@ Explicit bit-shift serialization guarantees identical on-disk layout across all 
 - Bytes needed = \(16,384 / 8 = \mathbf{2048}\) bytes.
 - This occupies exactly half of one 4096-byte block.
 
+---
+
+## Category 14: Physical Storage & Block Devices
+
+### Q56: How does a userspace filesystem interact directly with a physical USB storage drive in Linux?
+**Answer**:
+In Linux, physical storage devices are exposed as special block device files in `/dev` (e.g. `/dev/sdb`). When run with administrative privileges (`sudo`), a userspace program opens the device node using `open("/dev/sdb", O_RDWR)` and executes standard `pread()` and `pwrite()` system calls at 4096-byte sector boundaries. The Linux block layer and USB storage driver (`usb-storage` or `uas`) translate these requests into SCSI/USB Mass Storage commands sent over the USB bus directly to the flash drive's microcontroller.
+
+### Q57: Why does `fstat()` report `st_size = 0` on Linux block devices like `/dev/sdb`, and how does Filler determine actual device capacity?
+**Answer**:
+For block device special files (`S_ISBLK`), the inode in `/dev` represents a hardware device node rather than a data container, so POSIX `fstat().st_size` is defined as 0. 
+To obtain the real physical capacity:
+- On Linux: Filler issues `ioctl(fd, BLKGETSIZE64, &size_in_bytes)`.
+- On macOS: Filler issues `ioctl(fd, DKIOCGETBLOCKCOUNT, &blocks)` multiplied by `ioctl(fd, DKIOCGETBLOCKSIZE, &block_size)`.
+
+### Q58: How does Filler scale its data structures dynamically for an HP 16 GB USB flash drive?
+**Answer**:
+1. **Total Blocks**: \(\approx 16,000,000,000 / 4096 \approx \mathbf{3,906,250}\) blocks.
+2. **Block Bitmap**: Requires \(\lceil 3,906,250 / 32,768 \rceil = \mathbf{120}\) blocks (\(\approx 480\) KiB).
+3. **Inode Allocation**: Scales dynamically at 1 inode per 256 KiB: \(\lfloor 3,906,250 / 64 \rfloor = 61,035\), aligned to 16 = \(\mathbf{61,040}\) inodes.
+4. **Inode Bitmap**: \(\lceil 61,040 / 32,768 \rceil = \mathbf{2}\) blocks (8 KiB).
+5. **Inode Table**: \(61,040 / 16 = \mathbf{3,815}\) blocks (\(\approx 15.26\) MiB).
+6. **Data Region**: Starts at Block 3,938, providing \(\approx \mathbf{3,902,312}\) user data blocks (\(\approx 14.88\) GiB), maintaining over 99.9% data storage efficiency.
+
+### Q59: What critical safety mechanisms prevent accidental destruction of system disks when targeting `/dev/sdX`?
+**Answer**:
+1. **Never Auto-Format**: Opening a device only reads existing metadata; formatting requires explicit CLI flags (`--format`) or interactive `format`.
+2. **Active Mount Check**: Filler inspects `/proc/mounts`, `/etc/mtab`, or `getmntinfo`. If the target device or any of its partitions (e.g. `/dev/sdb1`) is mounted anywhere, formatting is blocked.
+3. **Root Disk Protection**: If the target device is mounted as `/` (root), formatting is unconditionally aborted.
+4. **Mandatory Confirmation Prompt**: The user is presented with the device path and exact gigabyte capacity and must type `"YES"` in capital letters to proceed with destructive formatting.
+
+### Q60: What happens if an HP 16 GB USB drive formatted with Filler is unplugged and later reconnected?
+**Answer**:
+Because all metadata and data writes are synchronous and committed directly to the physical storage blocks, the USB flash drive retains the complete filesystem layout persistently in NAND flash. When reconnected and targeted with `sudo ./bin/filler /dev/sdb`, `BlockDevice` opens the drive, `Shell::inspect_filesystem()` reads Block 0, verifies the `0x46494C4C` magic number, reads the bitmaps and root inode, and instantly restores the entire directory tree and all file contents without formatting.
+

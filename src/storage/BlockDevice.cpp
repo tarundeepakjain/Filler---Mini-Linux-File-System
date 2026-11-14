@@ -6,6 +6,14 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if defined(__linux__)
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#elif defined(__APPLE__)
+#include <sys/disk.h>
+#include <sys/ioctl.h>
+#endif
+
 // C++ standard library headers
 #include <cerrno>
 #include <stdexcept>
@@ -18,7 +26,7 @@ namespace filler::storage {
 
 BlockDevice::BlockDevice(const std::string &path)
     : path_(path) {
-    // Open the existing image file for reading and writing.
+    // Open the existing image file or block device for reading and writing.
     // Notice O_CREAT is intentionally omitted to avoid silently creating a new/empty file.
 #if defined(O_CLOEXEC)
     fd_ = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
@@ -27,42 +35,74 @@ BlockDevice::BlockDevice(const std::string &path)
 #endif
 
     if (fd_ < 0) {
-        throw std::system_error(errno, std::generic_category(), "Failed to open image file: " + path);
+        throw std::system_error(errno, std::generic_category(), "Failed to open image file or block device: " + path);
     }
 
-    // Inspect image metadata
+    // Inspect storage metadata
     struct stat st{};
     if (::fstat(fd_, &st) != 0) {
         int saved_errno = errno;
         ::close(fd_);
         fd_ = -1;
-        throw std::system_error(saved_errno, std::generic_category(), "Failed to stat image file: " + path);
+        throw std::system_error(saved_errno, std::generic_category(), "Failed to stat storage target: " + path);
     }
 
-    // Ensure it is a regular file
-    if (!S_ISREG(st.st_mode)) {
-        ::close(fd_);
-        fd_ = -1;
-        throw std::runtime_error("Backing storage is not a regular file: " + path);
-    }
+    std::uint64_t detected_size = 0;
 
-    // Ensure the image has a non-zero size
-    if (st.st_size <= 0) {
+    if (S_ISREG(st.st_mode)) {
+        is_block_device_ = false;
+        if (st.st_size <= 0) {
+            ::close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("Backing storage file is empty: " + path);
+        }
+        detected_size = static_cast<std::uint64_t>(st.st_size);
+    } else if (S_ISBLK(st.st_mode)) {
+        is_block_device_ = true;
+#if defined(__linux__) && defined(BLKGETSIZE64)
+        std::uint64_t blk_bytes = 0;
+        if (::ioctl(fd_, BLKGETSIZE64, &blk_bytes) != 0 || blk_bytes == 0) {
+            int err = errno;
+            ::close(fd_);
+            fd_ = -1;
+            throw std::system_error(err, std::generic_category(), "Failed to query Linux block device capacity (BLKGETSIZE64): " + path);
+        }
+        detected_size = blk_bytes;
+#elif defined(__APPLE__) && defined(DKIOCGETBLOCKCOUNT) && defined(DKIOCGETBLOCKSIZE)
+        std::uint64_t block_count = 0;
+        std::uint32_t block_size = 0;
+        if (::ioctl(fd_, DKIOCGETBLOCKCOUNT, &block_count) != 0 ||
+            ::ioctl(fd_, DKIOCGETBLOCKSIZE, &block_size) != 0 ||
+            block_count == 0 || block_size == 0) {
+            int err = errno;
+            ::close(fd_);
+            fd_ = -1;
+            throw std::system_error(err, std::generic_category(), "Failed to query macOS disk device capacity: " + path);
+        }
+        detected_size = block_count * static_cast<std::uint64_t>(block_size);
+#else
         ::close(fd_);
         fd_ = -1;
-        throw std::runtime_error("Backing storage file is empty: " + path);
+        throw std::runtime_error("Block device querying not supported on this platform: " + path);
+#endif
+    } else {
+        ::close(fd_);
+        fd_ = -1;
+        if (S_ISDIR(st.st_mode)) {
+            throw std::runtime_error("Backing storage is a directory, not a regular file or block device: " + path);
+        }
+        throw std::runtime_error("Unsupported device type: " + path + " (must be regular file or block device)");
     }
 
     // Ensure size is a multiple of BLOCK_SIZE (4096 bytes)
-    const auto file_size = static_cast<std::size_t>(st.st_size);
-    if (file_size % BLOCK_SIZE != 0) {
+    if (detected_size % BLOCK_SIZE != 0) {
         ::close(fd_);
         fd_ = -1;
-        throw std::runtime_error("Backing storage file size (" + std::to_string(file_size) +
+        throw std::runtime_error("Backing storage size (" + std::to_string(detected_size) +
                                  " bytes) is not an exact multiple of BLOCK_SIZE (4096 bytes): " + path);
     }
 
-    size_bytes_ = file_size;
+    size_bytes_ = detected_size;
     total_blocks_ = size_bytes_ / BLOCK_SIZE;
 }
 
@@ -74,7 +114,8 @@ BlockDevice::BlockDevice(BlockDevice&& other) noexcept
     : fd_(std::exchange(other.fd_, -1)),
       path_(std::move(other.path_)),
       total_blocks_(std::exchange(other.total_blocks_, 0)),
-      size_bytes_(std::exchange(other.size_bytes_, 0)) {}
+      size_bytes_(std::exchange(other.size_bytes_, 0)),
+      is_block_device_(std::exchange(other.is_block_device_, false)) {}
 
 BlockDevice& BlockDevice::operator=(BlockDevice&& other) noexcept {
     if (this != &other) {
@@ -83,6 +124,7 @@ BlockDevice& BlockDevice::operator=(BlockDevice&& other) noexcept {
         path_ = std::move(other.path_);
         total_blocks_ = std::exchange(other.total_blocks_, 0);
         size_bytes_ = std::exchange(other.size_bytes_, 0);
+        is_block_device_ = std::exchange(other.is_block_device_, false);
     }
     return *this;
 }
@@ -199,12 +241,20 @@ std::uint64_t BlockDevice::total_blocks() const noexcept {
     return total_blocks_;
 }
 
-std::size_t BlockDevice::size_bytes() const noexcept {
+std::uint64_t BlockDevice::size_bytes() const noexcept {
     return size_bytes_;
 }
 
 int BlockDevice::fd() const noexcept {
     return fd_;
+}
+
+bool BlockDevice::is_block_device() const noexcept {
+    return is_block_device_;
+}
+
+const std::string& BlockDevice::path() const noexcept {
+    return path_;
 }
 
 } // namespace filler::storage

@@ -30,14 +30,17 @@ public:
 
     [[nodiscard]] bool is_open() const noexcept;
     [[nodiscard]] std::uint64_t total_blocks() const noexcept;
-    [[nodiscard]] std::size_t size_bytes() const noexcept;
+    [[nodiscard]] std::uint64_t size_bytes() const noexcept;
     [[nodiscard]] int fd() const noexcept;
+    [[nodiscard]] bool is_block_device() const noexcept;
+    [[nodiscard]] const std::string& path() const noexcept;
 
 private:
     int fd_{-1};
     std::string path_;
     std::uint64_t total_blocks_{0};
-    std::size_t size_bytes_{0};
+    std::uint64_t size_bytes_{0};
+    bool is_block_device_{false};
 };
 
 } 

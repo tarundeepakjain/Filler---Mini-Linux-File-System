@@ -66,8 +66,12 @@ In userspace filesystems, interacting with an image file using raw POSIX `lseek(
 3. **Leaked low-level concerns**: Subsystems like `FileManager` or `DirectoryManager` should not concern themselves with file descriptors or error numbers (`errno`).
 
 ### 2.3 How Filler Implements `BlockDevice` (`src/storage/BlockDevice.cpp`)
-The `BlockDevice` class abstracts a regular file as a sequence of 4096-byte blocks (`BLOCK_SIZE = 4096`):
-- **Encapsulation**: Manages an internal POSIX file descriptor (`fd_`), total block count (`16,384`), and file size (`67,108,864` bytes).
+The `BlockDevice` class provides dual-mode storage abstraction, operating on either **regular disk image files** or **physical Linux block devices** (e.g. `/dev/sdb` representing an HP 16 GB USB flash drive):
+- **Storage Target Detection**: Uses `fstat()` on the file descriptor. 
+  - If `S_ISREG`: Operates in regular file mode, obtaining size via `st.st_size`.
+  - If `S_ISBLK`: Operates in physical block device mode. Under Linux, queries capacity using `ioctl(fd, BLKGETSIZE64, &bytes)`. Under macOS, queries capacity using `ioctl(fd, DKIOCGETBLOCKCOUNT)` and `ioctl(fd, DKIOCGETBLOCKSIZE)`.
+  - Rejects directories and invalid special files with informative error messages.
+- **Dynamic 64-Bit Capacity**: Tracks capacity using `uint64_t total_blocks_` and `uint64_t size_bytes_`, supporting volumes from 64 MiB (16,384 blocks) up to multi-terabyte drives with zero 32-bit overflow risk.
 - **Positional I/O**: Filler uses positional I/O (`lseek` + full transfer loops or `pread`/`pwrite` semantics) to perform atomic read and write operations at exact byte offsets:
   \[
   \text{offset} = \text{block\_id} \times 4096
@@ -78,6 +82,7 @@ The `BlockDevice` class abstracts a regular file as a sequence of 4096-byte bloc
   - `buffer_size < BLOCK_SIZE`: Throws `std::invalid_argument`.
   - Device closed: Throws `std::runtime_error`.
 - **Resource Management (RAII)**: Owns the file descriptor. The destructor safely closes `fd_`, and copy operations are deleted to prevent double-closing or file descriptor aliasing. Move semantics (`BlockDevice(BlockDevice&&)`) transfer ownership cleanly.
+- **Device Introspection**: Exposes `is_block_device()` and `path()`, allowing higher layers (such as the Shell and Formatter) to enforce physical device safety rules and mount inspections.
 
 ```text
 Filler Filesystem Layer (Superblock, Bitmaps, Inodes, Directories, Files)
@@ -85,20 +90,18 @@ Filler Filesystem Layer (Superblock, Bitmaps, Inodes, Directories, Files)
        |  read_block(block_id, buffer, 4096)
        |  write_block(block_id, buffer, 4096)
        v
-BlockDevice Abstraction (Checks bounds, manages fd, converts block_id to byte offset)
+BlockDevice Abstraction (Checks bounds, manages fd, converts block_id to 64-bit byte offset)
        |
-       |  lseek(fd, block_id * 4096, SEEK_SET) + read()/write()
-       v
-POSIX File System Calls (Host OS System Calls)
-       |
-       v
-Backing Image File ("filler.img", 64 MiB flat file on host disk)
-       |
-       v
-Host Operating System Kernel (Buffer Cache, Block Layer, NVMe/SATA Driver)
-       |
-       v
-Physical Storage Device (Host Hardware)
+       +---------------------------------------------+
+       |                                             |
+       v (Regular File: S_ISREG)                     v (Physical Block Device: S_ISBLK)
+POSIX pread64/pwrite64 on disk.img           POSIX pread64/pwrite64 on /dev/sdX
+       |                                             |
+       v                                             v
+Host OS Virtual Filesystem (ext4/APFS)        Linux SCSI/USB Block Subsystem (usb-storage / uas)
+       |                                             |
+       v                                             v
+Host Internal Drive (SSD/NVMe)               Physical USB Flash Drive (HP 16 GB Flash Drive)
 ```
 
 ---

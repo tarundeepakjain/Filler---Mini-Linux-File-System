@@ -309,3 +309,44 @@ Filler provides full persistent storage on the host filesystem:
    - `InodeManager` and `BlockBitmap` read Blocks 2 and 1 to repopulate their in-memory state.
    - Root directory (Inode 1) is ready immediately. All files, directories, sizes, and timestamps match the state left at exit.
 
+---
+
+## 4. Physical USB Storage Operations (HP 16 GB Flash Drive)
+
+### 4.1 CLI Invocations
+```bash
+# Standard regular file session:
+./bin/filler disk.img
+
+# Format regular file upfront:
+./bin/filler --format disk.img
+
+# Open physical USB device with root privileges (read-only inspection if formatted):
+sudo ./bin/filler /dev/sdb
+
+# Format physical USB device before opening:
+sudo ./bin/filler --format /dev/sdb
+```
+
+### 4.2 Destructive Format Guardrail & Mount Protection
+When `format` is invoked against a physical block device (either via CLI `--format` or interactive REPL `format`):
+1. **Mount Point Verification**:
+   The shell inspects `/proc/mounts`, `/etc/mtab`, or `getmntinfo`. If any partition (e.g. `/dev/sdb1`) is mounted, the operation fails immediately:
+   ```text
+   Error: Device /dev/sdb (or partition) is currently mounted at '/media/user/HP_USB'. Please unmount it before formatting.
+   ```
+2. **Root Disk Protection**:
+   If the target device or any partition is mounted at `/`, formatting is refused unconditionally:
+   ```text
+   Error: Refusing to format system root disk: /dev/sda
+   ```
+3. **Mandatory Confirmation**:
+   The shell reports detected geometry and prompts for explicit confirmation:
+   ```text
+   WARNING: Target is a physical block device: /dev/sdb
+   Detected capacity: 16000000000 bytes (3906250 blocks, 14.90 GiB)
+   All existing data and partitions on this device will be PERMANENTLY DESTROYED!
+   Type 'YES' to confirm destructive formatting: 
+   ```
+   Typing anything other than `YES` cancels the operation safely.
+

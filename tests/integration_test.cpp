@@ -8,6 +8,10 @@
 #include "fs/Superblock.hpp"
 #include "storage/BlockDevice.hpp"
 
+// POSIX and system headers
+#include <fcntl.h>
+#include <unistd.h>
+
 // C++ standard library
 #include <algorithm>
 #include <cstddef>
@@ -672,6 +676,153 @@ void test_data_integrity_and_consistency() {
     }
 }
 
+// Scenario G: Dynamic Capacity (256 MiB, 1 GiB, 4 GiB Sparse Images)
+void test_scenario_g_dynamic_capacity_sparse_images() {
+    // 1. 256 MiB image
+    {
+        const std::string img_path = "build/test_dynamic_256m.img";
+        std::remove(img_path.c_str());
+        int fd = ::open(img_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        ASSERT_TRUE(fd >= 0);
+        ASSERT_EQ(::ftruncate(fd, static_cast<off_t>(256ULL * 1024ULL * 1024ULL)), 0);
+        ::close(fd);
+
+        {
+            Shell shell(img_path);
+            ASSERT_FALSE(shell.is_formatted());
+            ASSERT_FALSE(shell.is_block_device());
+            std::ostringstream out;
+            shell.format_filesystem(out);
+            ASSERT_TRUE(shell.is_formatted());
+
+            BlockDevice dev(img_path);
+            Superblock sb = Superblock::read(dev);
+            ASSERT_EQ(sb.total_blocks, 65536ULL);
+            ASSERT_EQ(sb.total_inodes, 1024ULL);
+            ASSERT_EQ(sb.block_bitmap_blocks, 2ULL);
+            ASSERT_EQ(sb.inode_bitmap_blocks, 1ULL);
+            ASSERT_EQ(sb.inode_table_blocks, 64ULL);
+            ASSERT_EQ(sb.data_region_start, 68ULL);
+            ASSERT_EQ(sb.data_region_blocks, 65536ULL - 68ULL);
+
+            ASSERT_TRUE(shell.execute_command("mkdir data", out));
+            ASSERT_TRUE(shell.execute_command("cd data", out));
+            ASSERT_TRUE(shell.execute_command("touch notes.txt", out));
+            ASSERT_TRUE(shell.execute_command("write notes.txt \"Testing 256 MiB image\"", out));
+            out.str("");
+            ASSERT_TRUE(shell.execute_command("cat notes.txt", out));
+            ASSERT_TRUE(out.str().find("Testing 256 MiB image") != std::string::npos);
+        }
+
+        std::remove(img_path.c_str());
+    }
+
+    // 2. 1 GiB image
+    {
+        const std::string img_path = "build/test_dynamic_1g.img";
+        std::remove(img_path.c_str());
+        int fd = ::open(img_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        ASSERT_TRUE(fd >= 0);
+        ASSERT_EQ(::ftruncate(fd, static_cast<off_t>(1024ULL * 1024ULL * 1024ULL)), 0);
+        ::close(fd);
+
+        {
+            Shell shell(img_path);
+            std::ostringstream out;
+            shell.format_filesystem(out);
+            ASSERT_TRUE(shell.is_formatted());
+
+            BlockDevice dev(img_path);
+            Superblock sb = Superblock::read(dev);
+            ASSERT_EQ(sb.total_blocks, 262144ULL);
+            ASSERT_EQ(sb.total_inodes, 4096ULL);
+            ASSERT_EQ(sb.block_bitmap_blocks, 8ULL);
+            ASSERT_EQ(sb.inode_bitmap_blocks, 1ULL);
+            ASSERT_EQ(sb.inode_table_blocks, 256ULL);
+            ASSERT_EQ(sb.data_region_start, 266ULL);
+            ASSERT_EQ(sb.data_region_blocks, 262144ULL - 266ULL);
+
+            ASSERT_TRUE(shell.execute_command("mkdir project", out));
+            ASSERT_TRUE(shell.execute_command("touch project/readme.md", out));
+            ASSERT_TRUE(shell.execute_command("write project/readme.md \"Filler 1 GiB filesystem\"", out));
+        }
+
+        // Reopen in a second session and verify persistence
+        {
+            Shell shell(img_path);
+            ASSERT_TRUE(shell.is_formatted());
+            std::ostringstream out;
+            ASSERT_TRUE(shell.execute_command("cat /project/readme.md", out));
+            ASSERT_TRUE(out.str().find("Filler 1 GiB filesystem") != std::string::npos);
+        }
+
+        std::remove(img_path.c_str());
+    }
+
+    // 3. 4 GiB image
+    {
+        const std::string img_path = "build/test_dynamic_4g.img";
+        std::remove(img_path.c_str());
+        int fd = ::open(img_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        ASSERT_TRUE(fd >= 0);
+        ASSERT_EQ(::ftruncate(fd, static_cast<off_t>(4ULL * 1024ULL * 1024ULL * 1024ULL)), 0);
+        ::close(fd);
+
+        {
+            Shell shell(img_path);
+            std::ostringstream out;
+            shell.format_filesystem(out);
+            ASSERT_TRUE(shell.is_formatted());
+
+            BlockDevice dev(img_path);
+            Superblock sb = Superblock::read(dev);
+            ASSERT_EQ(sb.total_blocks, 1048576ULL);
+            ASSERT_EQ(sb.total_inodes, 16384ULL);
+            ASSERT_EQ(sb.block_bitmap_blocks, 32ULL);
+            ASSERT_EQ(sb.inode_bitmap_blocks, 1ULL);
+            ASSERT_EQ(sb.inode_table_blocks, 1024ULL);
+            ASSERT_EQ(sb.data_region_start, 1058ULL);
+            ASSERT_EQ(sb.data_region_blocks, 1048576ULL - 1058ULL);
+
+            ASSERT_TRUE(shell.execute_command("mkdir large_test", out));
+            ASSERT_TRUE(shell.execute_command("touch large_test/huge.txt", out));
+            ASSERT_TRUE(shell.execute_command("write large_test/huge.txt \"4 GiB block device scale verification\"", out));
+            out.str("");
+            ASSERT_TRUE(shell.execute_command("cat large_test/huge.txt", out));
+            ASSERT_TRUE(out.str().find("4 GiB block device scale verification") != std::string::npos);
+        }
+
+        // Second session verification
+        {
+            Shell shell(img_path);
+            ASSERT_TRUE(shell.is_formatted());
+            std::ostringstream out;
+            ASSERT_TRUE(shell.execute_command("cat /large_test/huge.txt", out));
+            ASSERT_TRUE(out.str().find("4 GiB block device scale verification") != std::string::npos);
+        }
+
+        std::remove(img_path.c_str());
+    }
+}
+
+// Scenario H: Block Device Safety & Properties
+void test_scenario_h_block_device_safety() {
+    const std::string img_path = "build/test_safety_reg.img";
+    std::remove(img_path.c_str());
+    int fd = ::open(img_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_EQ(::ftruncate(fd, 64 * 1024 * 1024), 0);
+    ::close(fd);
+
+    Shell shell(img_path);
+    ASSERT_FALSE(shell.is_block_device());
+    ASSERT_TRUE(shell.device() != nullptr);
+    ASSERT_FALSE(shell.device()->is_block_device());
+    ASSERT_EQ(shell.device()->path(), img_path);
+
+    std::remove(img_path.c_str());
+}
+
 // ============================================================================
 // Integration Test Runner
 // ============================================================================
@@ -692,6 +843,8 @@ int main() {
         {"Scenario E: Resource Management", test_scenario_e_resource_management},
         {"Scenario F: Invalid Operations", test_scenario_f_invalid_operations},
         {"Data Integrity & Consistency", test_data_integrity_and_consistency},
+        {"Scenario G: Dynamic Capacity (256M, 1G, 4G)", test_scenario_g_dynamic_capacity_sparse_images},
+        {"Scenario H: Block Device Safety & Properties", test_scenario_h_block_device_safety},
     };
 
     std::cout << "======================================================================\n";

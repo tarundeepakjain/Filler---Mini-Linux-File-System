@@ -618,6 +618,69 @@ void test_edge_case_destructor_closes_fd() {
     ASSERT_EQ(errno, EBADF);
 }
 
+void test_device_properties_and_is_block_device() {
+    ScopedTestFile test_file("build/test_properties.img");
+    test_file.create(4096 * 4, 0x00);
+
+    BlockDevice dev(test_file.path());
+    ASSERT_TRUE(dev.is_open());
+    ASSERT_FALSE(dev.is_block_device()); // Regular file, not a Linux/macOS block device
+    ASSERT_EQ(dev.path(), test_file.path());
+    ASSERT_EQ(dev.total_blocks(), 4ULL);
+    ASSERT_EQ(dev.size_bytes(), 16384ULL);
+}
+
+void test_large_capacity_sparse_device() {
+    // Test 4 GiB sparse file: 1,048,576 blocks (4,294,967,296 bytes)
+    const std::string sparse_path = "build/test_sparse_4gib.img";
+    std::remove(sparse_path.c_str());
+
+    int fd = ::open(sparse_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_TRUE(fd >= 0);
+    const std::uint64_t target_size = 4ULL * 1024ULL * 1024ULL * 1024ULL; // 4 GiB
+    ASSERT_EQ(::ftruncate(fd, static_cast<off_t>(target_size)), 0);
+    ::close(fd);
+
+    {
+        BlockDevice dev(sparse_path);
+        ASSERT_TRUE(dev.is_open());
+        ASSERT_FALSE(dev.is_block_device());
+        ASSERT_EQ(dev.size_bytes(), target_size);
+        ASSERT_EQ(dev.total_blocks(), 1048576ULL);
+
+        // Write to block 0
+        std::vector<std::uint8_t> block0(BlockDevice::BLOCK_SIZE, 0xAA);
+        dev.write_block(0, block0.data(), block0.size());
+
+        // Write to the very last block at index 1,048,575
+        const std::uint64_t last_blk = dev.total_blocks() - 1;
+        std::vector<std::uint8_t> last_block(BlockDevice::BLOCK_SIZE, 0x55);
+        dev.write_block(last_blk, last_block.data(), last_block.size());
+
+        // Verify read back
+        std::vector<std::uint8_t> read_buf(BlockDevice::BLOCK_SIZE, 0);
+        dev.read_block(0, read_buf.data(), read_buf.size());
+        ASSERT_TRUE(read_buf == block0);
+
+        dev.read_block(last_blk, read_buf.data(), read_buf.size());
+        ASSERT_TRUE(read_buf == last_block);
+    }
+
+    // Reopen and verify persistence across instances
+    {
+        BlockDevice dev(sparse_path);
+        ASSERT_EQ(dev.size_bytes(), target_size);
+        ASSERT_EQ(dev.total_blocks(), 1048576ULL);
+
+        std::vector<std::uint8_t> read_buf(BlockDevice::BLOCK_SIZE, 0);
+        dev.read_block(1048575ULL, read_buf.data(), read_buf.size());
+        std::vector<std::uint8_t> expected(BlockDevice::BLOCK_SIZE, 0x55);
+        ASSERT_TRUE(read_buf == expected);
+    }
+
+    std::remove(sparse_path.c_str());
+}
+
 // ============================================================================
 // Test Suite Runner
 // ============================================================================
@@ -680,6 +743,8 @@ int main() {
     runner.run("14d. Handling buffer_size greater than BLOCK_SIZE", test_edge_case_oversized_buffer);
     runner.run("14e. Idempotent close calls", test_edge_case_idempotent_close);
     runner.run("14f. Destructor releases underlying file descriptor", test_edge_case_destructor_closes_fd);
+    runner.run("15. BlockDevice properties: path() and is_block_device()", test_device_properties_and_is_block_device);
+    runner.run("16. Large capacity (4 GiB sparse device) handling", test_large_capacity_sparse_device);
 
     std::cout << "======================================================================\n";
     std::cout << "Test Summary: " << runner.passed << " / " << runner.total
