@@ -121,10 +121,15 @@ Shell::Shell(const std::string& image_path)
         ::close(fd);
     } else if (st.st_size == 0) {
         int fd = ::open(image_path_.c_str(), O_RDWR);
-        if (fd >= 0) {
-            (void)::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE));
-            ::close(fd);
+        if (fd < 0) {
+            throw std::system_error(errno, std::generic_category(), "Failed to open empty disk image: " + image_path_);
         }
+        if (::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE)) != 0) {
+            int err = errno;
+            ::close(fd);
+            throw std::system_error(err, std::generic_category(), "Failed to allocate disk image size: " + image_path_);
+        }
+        ::close(fd);
     }
 
     device_ = std::make_unique<filler::storage::BlockDevice>(image_path_);
