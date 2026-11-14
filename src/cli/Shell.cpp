@@ -26,6 +26,14 @@ namespace filler::cli {
 
 namespace {
 
+inline std::uint32_t read_u32_le(const std::uint8_t* src) noexcept {
+    std::uint32_t val = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        val |= (static_cast<std::uint32_t>(src[i]) << (i * 8U));
+    }
+    return val;
+}
+
 std::string process_text_argument(const std::string& raw) {
     if (raw.empty()) {
         return "";
@@ -165,42 +173,129 @@ bool parse_write_args(const std::string& args, std::string& path_out, bool& has_
 Shell::Shell(const std::string& image_path)
     : image_path_(image_path) {
     struct stat st{};
-    if (::stat(image_path_.c_str(), &st) != 0) {
+    const bool exists = (::stat(image_path_.c_str(), &st) == 0);
+    if (!exists) {
         int fd = ::open(image_path_.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) {
-            throw std::system_error(errno, std::generic_category(), "Failed to create disk image: " + image_path_);
+            fs_state_ = FilesystemState::IO_ERROR;
+            is_formatted_ = false;
+            status_message_ = "Disk I/O error: Failed to create disk image: " + image_path_;
+            return;
         }
         if (::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE)) != 0) {
             int err = errno;
             ::close(fd);
-            throw std::system_error(err, std::generic_category(), "Failed to allocate disk image size: " + image_path_);
-        }
-        ::close(fd);
-    } else if (st.st_size < static_cast<off_t>(DEFAULT_IMAGE_SIZE)) {
-        int fd = ::open(image_path_.c_str(), O_RDWR);
-        if (fd < 0) {
-            throw std::system_error(errno, std::generic_category(), "Failed to open disk image: " + image_path_);
-        }
-        if (::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE)) != 0) {
-            int err = errno;
-            ::close(fd);
-            throw std::system_error(err, std::generic_category(), "Failed to allocate disk image size: " + image_path_);
+            fs_state_ = FilesystemState::IO_ERROR;
+            is_formatted_ = false;
+            status_message_ = "Disk I/O error: Failed to allocate disk image size: " + std::string(strerror(err));
+            return;
         }
         ::close(fd);
     }
-
-    device_ = std::make_unique<filler::storage::BlockDevice>(image_path_);
 
     try {
-        std::vector<std::uint8_t> block0(filler::storage::BlockDevice::BLOCK_SIZE, 0);
-        device_->read_block(filler::fs::Superblock::SUPERBLOCK_BLOCK_ID, block0.data(), block0.size());
-        auto sb = filler::fs::Superblock::deserialize(block0.data(), block0.size());
-        sb.validate();
-        is_formatted_ = true;
-        init_subsystems();
-    } catch (...) {
+        device_ = std::make_unique<filler::storage::BlockDevice>(image_path_);
+    } catch (const std::exception& ex) {
+        device_.reset();
+        fs_state_ = FilesystemState::IO_ERROR;
         is_formatted_ = false;
+        status_message_ = "Disk I/O error opening image: " + std::string(ex.what());
+        return;
     }
+
+    inspect_filesystem();
+}
+
+void Shell::inspect_filesystem() {
+    is_formatted_ = false;
+    current_dir_inode_ = filler::fs::Superblock::DEFAULT_ROOT_INODE;
+    current_path_ = "/";
+
+    if (!device_ || !device_->is_open()) {
+        fs_state_ = FilesystemState::IO_ERROR;
+        status_message_ = "Disk I/O error: Block device is not open";
+        return;
+    }
+
+    std::vector<std::uint8_t> block0(filler::storage::BlockDevice::BLOCK_SIZE, 0);
+    try {
+        device_->read_block(filler::fs::Superblock::SUPERBLOCK_BLOCK_ID, block0.data(), block0.size());
+    } catch (const std::exception& ex) {
+        fs_state_ = FilesystemState::IO_ERROR;
+        status_message_ = "Disk I/O error reading superblock: " + std::string(ex.what());
+        return;
+    }
+
+    const std::uint32_t magic = read_u32_le(block0.data() + filler::fs::offsets::MAGIC);
+    const std::uint32_t version = read_u32_le(block0.data() + filler::fs::offsets::VERSION);
+
+    // Case 2: Unformatted or newly created disk image (magic == 0)
+    if (magic == 0) {
+        fs_state_ = FilesystemState::UNFORMATTED;
+        status_message_ = "Filesystem is unformatted. Run 'format' to initialize.";
+        return;
+    }
+
+    // Case 3: Invalid filesystem image (unrecognized magic or unsupported version)
+    if (magic != filler::fs::Superblock::MAGIC) {
+        fs_state_ = FilesystemState::INVALID_IMAGE;
+        std::ostringstream oss;
+        oss << "Invalid filesystem image: unrecognized magic number 0x"
+            << std::hex << std::uppercase << magic << " (expected 0x"
+            << std::hex << std::uppercase << filler::fs::Superblock::MAGIC << ")";
+        status_message_ = oss.str();
+        return;
+    }
+
+    if (version != filler::fs::Superblock::FORMAT_VERSION) {
+        fs_state_ = FilesystemState::INVALID_IMAGE;
+        status_message_ = "Invalid filesystem image: unsupported version " +
+                          std::to_string(version) + " (expected " +
+                          std::to_string(filler::fs::Superblock::FORMAT_VERSION) + ")";
+        return;
+    }
+
+    // Case 4: Corrupted filesystem metadata
+    filler::fs::Superblock sb;
+    try {
+        sb = filler::fs::Superblock::deserialize(block0.data(), block0.size(), true);
+    } catch (const std::exception& ex) {
+        fs_state_ = FilesystemState::CORRUPTED;
+        status_message_ = "Corrupted filesystem metadata: " + std::string(ex.what());
+        return;
+    }
+
+    if (sb.total_blocks != device_->total_blocks()) {
+        fs_state_ = FilesystemState::CORRUPTED;
+        status_message_ = "Corrupted filesystem metadata: Superblock total_blocks (" +
+                          std::to_string(sb.total_blocks) + ") does not match physical device blocks (" +
+                          std::to_string(device_->total_blocks()) + ")";
+        return;
+    }
+
+    try {
+        init_subsystems();
+        if (!inode_manager_->is_inode_allocated(sb.root_inode)) {
+            throw std::runtime_error("Root inode " + std::to_string(sb.root_inode) + " is not allocated");
+        }
+        filler::fs::Inode root_inode = inode_manager_->get_inode(sb.root_inode);
+        if (!root_inode.is_directory()) {
+            throw std::runtime_error("Root inode " + std::to_string(sb.root_inode) + " is not a directory");
+        }
+    } catch (const std::exception& ex) {
+        fs_state_ = FilesystemState::CORRUPTED;
+        status_message_ = "Corrupted filesystem metadata in subsystem initialization: " + std::string(ex.what());
+        block_bitmap_.reset();
+        inode_manager_.reset();
+        directory_manager_.reset();
+        file_manager_.reset();
+        return;
+    }
+
+    // Case 1: Valid formatted filesystem
+    fs_state_ = FilesystemState::VALID;
+    is_formatted_ = true;
+    status_message_ = "Filesystem is valid and mounted.";
 }
 
 void Shell::init_subsystems() {
@@ -211,8 +306,10 @@ void Shell::init_subsystems() {
 }
 
 void Shell::format_filesystem(std::ostream& out) {
-    if (device_->total_blocks() != filler::fs::Formatter::DEFAULT_TOTAL_BLOCKS) {
-        device_->close();
+    if (!device_ || device_->total_blocks() != filler::fs::Formatter::DEFAULT_TOTAL_BLOCKS) {
+        if (device_) {
+            device_->close();
+        }
         int fd = ::open(image_path_.c_str(), O_RDWR);
         if (fd < 0) {
             throw std::system_error(errno, std::generic_category(), "Failed to open disk image: " + image_path_);
@@ -229,15 +326,16 @@ void Shell::format_filesystem(std::ostream& out) {
     filler::fs::Formatter::format(*device_);
     init_subsystems();
     directory_manager_->initialize_root();
-    current_dir_inode_ = filler::fs::Superblock::DEFAULT_ROOT_INODE;
-    current_path_ = "/";
-    is_formatted_ = true;
+    inspect_filesystem();
     out << "Filesystem successfully formatted.\n";
 }
 
 std::uint64_t Shell::resolve_path(const std::string& path, std::string* canonical_out) {
     if (!is_formatted_) {
-        throw std::runtime_error("Filesystem is not formatted");
+        if (fs_state_ == FilesystemState::UNFORMATTED) {
+            throw std::runtime_error("Filesystem is not formatted");
+        }
+        throw std::runtime_error(status_message_);
     }
 
     if (path.empty()) {
@@ -409,6 +507,9 @@ void Shell::cmd_cat(const std::string& args, std::ostream& out) {
     if (inode.size_bytes > 0) {
         const auto data = file_manager_->read(file_inode, 0, inode.size_bytes);
         out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        if (!data.empty() && data.back() != '\n') {
+            out << "\n";
+        }
     }
 }
 
@@ -650,7 +751,11 @@ bool Shell::execute_command(const std::string& cmd_line, std::ostream& out) {
             cmd_format(out);
         } else {
             if (!is_formatted_) {
-                out << "Error: Filesystem is not formatted. Run 'format' first.\n";
+                if (fs_state_ == FilesystemState::UNFORMATTED) {
+                    out << "Error: Filesystem is not formatted. Run 'format' first.\n";
+                } else {
+                    out << "Error: " << status_message_ << "\n";
+                }
                 return true;
             }
 

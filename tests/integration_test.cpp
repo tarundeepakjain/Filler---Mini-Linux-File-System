@@ -295,19 +295,19 @@ void test_scenario_c_file_operations() {
     out.str("");
     ASSERT_TRUE(shell.execute_command("write test.txt \"Hello Filler World!\"", out));
     ASSERT_TRUE(shell.execute_command("cat test.txt", out));
-    ASSERT_EQ(out.str(), "Hello Filler World!");
+    ASSERT_EQ(out.str(), "Hello Filler World!\n");
 
     // 4. Append content
     out.str("");
     ASSERT_TRUE(shell.execute_command("append test.txt \" More data.\"", out));
     ASSERT_TRUE(shell.execute_command("cat test.txt", out));
-    ASSERT_EQ(out.str(), "Hello Filler World! More data.");
+    ASSERT_EQ(out.str(), "Hello Filler World! More data.\n");
 
     // 5. Overwrite partial content at offset 6: "Hello Planet World! More data."
     out.str("");
     ASSERT_TRUE(shell.execute_command("write test.txt 6 \"Planet\"", out));
     ASSERT_TRUE(shell.execute_command("cat test.txt", out));
-    ASSERT_EQ(out.str(), "Hello Planet World! More data.");
+    ASSERT_EQ(out.str(), "Hello Planet World! More data.\n");
 
     // 6. Create file larger than one block (> 4096 bytes)
     // We'll write 10,000 bytes spanning 3 blocks
@@ -405,11 +405,11 @@ void test_scenario_d_persistence() {
         // Verify nested directory and file
         out.str("");
         ASSERT_TRUE(shell2.execute_command("cat docs/specs/filler.txt", out));
-        ASSERT_EQ(out.str(), "Filler Mini File System Spec v1.0");
+        ASSERT_EQ(out.str(), "Filler Mini File System Spec v1.0\n");
 
         out.str("");
         ASSERT_TRUE(shell2.execute_command("cat src/main.cpp", out));
-        ASSERT_EQ(out.str(), "int main() { return 0; }");
+        ASSERT_EQ(out.str(), "int main() { return 0; }\n");
 
         // Verify Superblock free counts preserved
         BlockDevice dev(img.path());

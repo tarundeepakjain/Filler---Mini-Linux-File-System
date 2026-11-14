@@ -90,7 +90,8 @@ private:
     filler::fs::BlockBitmap& block_bitmap_;
     filler::fs::DirectoryManager& directory_manager_;
 
-    std::uint64_t get_or_allocate_block(Inode& inode, std::uint64_t logical_block, bool allocate);
+    std::uint64_t get_or_allocate_block(Inode& inode, std::uint64_t logical_block, bool allocate,
+                                        std::vector<std::uint64_t>* newly_allocated = nullptr);
     void free_logical_block(Inode& inode, std::uint64_t logical_block);
     void free_all_blocks(Inode& inode);
 };

@@ -18,6 +18,14 @@
 
 namespace filler::cli {
 
+enum class FilesystemState {
+    VALID,           // Valid formatted filesystem
+    UNFORMATTED,     // Newly created or zero-filled disk image
+    INVALID_IMAGE,   // Invalid magic number, unsupported version, or malformed image
+    CORRUPTED,       // Corrupted superblock metadata or inconsistent subsystem structures
+    IO_ERROR         // Disk I/O failure or inaccessible image file
+};
+
 class Shell {
 public:
     static constexpr std::size_t DEFAULT_IMAGE_SIZE = 64ULL * 1024ULL * 1024ULL; // 64 MiB
@@ -38,6 +46,8 @@ public:
 
     // Accessors
     [[nodiscard]] bool is_formatted() const noexcept { return is_formatted_; }
+    [[nodiscard]] FilesystemState filesystem_state() const noexcept { return fs_state_; }
+    [[nodiscard]] const std::string& status_message() const noexcept { return status_message_; }
     [[nodiscard]] std::uint64_t current_dir_inode() const noexcept { return current_dir_inode_; }
     [[nodiscard]] const std::string& current_path() const noexcept { return current_path_; }
     [[nodiscard]] filler::storage::BlockDevice* device() noexcept { return device_.get(); }
@@ -58,9 +68,12 @@ private:
     std::unique_ptr<filler::fs::FileManager> file_manager_;
 
     bool is_formatted_{false};
+    FilesystemState fs_state_{FilesystemState::UNFORMATTED};
+    std::string status_message_{"Filesystem is unformatted. Run 'format' to initialize."};
     std::uint64_t current_dir_inode_{1};
     std::string current_path_{"/"};
 
+    void inspect_filesystem();
     void init_subsystems();
     [[nodiscard]] std::pair<std::string, std::string> split_path(const std::string& path);
 

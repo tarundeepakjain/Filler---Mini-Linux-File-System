@@ -502,6 +502,122 @@ void test_invalid_operations_and_error_handling() {
     ASSERT_THROWS(fm.remove(1, "folder"), FileManagerError);
 }
 
+void test_truncate_growth_and_rollback() {
+    auto file = create_formatted_disk_with_root("build/test_fm_truncate_rollback.img");
+    BlockDevice dev(file->path());
+    FileManager fm(dev);
+
+    const std::uint64_t fid = fm.create(1, "grow_test.txt");
+
+    // 1. Successful file growth & 2. Growth requiring multiple blocks
+    // Grow from 0 to 3 blocks (12,288 bytes)
+    fm.truncate(fid, 12288);
+    Inode in1 = fm.stat(fid);
+    ASSERT_EQ(in1.size_bytes, 12288ULL);
+    ASSERT_EQ(in1.blocks_count, 3ULL);
+
+    // Write distinctive data across all 3 blocks
+    std::string test_data(12288, 'X');
+    for (std::size_t i = 0; i < test_data.size(); ++i) {
+        test_data[i] = static_cast<char>('A' + (i % 26));
+    }
+    fm.write(fid, 0, test_data);
+
+    // Verify written content matches
+    auto read_back = fm.read(fid, 0, 12288);
+    ASSERT_EQ(read_back.size(), 12288ULL);
+    ASSERT_EQ(std::memcmp(read_back.data(), test_data.data(), 12288), 0);
+
+    // 3. Allocation failure after at least one successful allocation
+    // We exhaust the BlockBitmap until exactly 2 free blocks remain.
+    std::vector<std::uint64_t> filler_blocks;
+    while (fm.block_bitmap().count_free_blocks() > 2) {
+        filler_blocks.push_back(fm.block_bitmap().allocate());
+    }
+    ASSERT_EQ(fm.block_bitmap().count_free_blocks(), 2ULL);
+
+    const std::uint64_t free_before = fm.block_bitmap().count_free_blocks();
+    const Inode stat_before = fm.stat(fid);
+
+    // Requesting 5 additional blocks (need 5, but only 2 free)
+    // Old blocks = 3. New size = 8 * 4096 = 32768.
+    // truncate will allocate 2 blocks, then fail on the 3rd!
+    ASSERT_THROWS(fm.truncate(fid, 32768), filler::fs::BlockBitmapError);
+
+    // 5. Verification that no blocks leak after failure
+    const std::uint64_t free_after = fm.block_bitmap().count_free_blocks();
+    ASSERT_EQ(free_after, free_before);
+
+    // Inode metadata remained unchanged
+    const Inode stat_after = fm.stat(fid);
+    ASSERT_EQ(stat_after.size_bytes, stat_before.size_bytes);
+    ASSERT_EQ(stat_after.blocks_count, stat_before.blocks_count);
+    for (std::size_t b = 0; b < Inode::DIRECT_BLOCKS_COUNT; ++b) {
+        ASSERT_EQ(stat_after.direct_blocks[b], stat_before.direct_blocks[b]);
+    }
+    ASSERT_EQ(stat_after.single_indirect, stat_before.single_indirect);
+    ASSERT_EQ(stat_after.double_indirect, stat_before.double_indirect);
+
+    // 6. Verification that original file contents remain unchanged after failure
+    auto content_after_fail = fm.read(fid, 0, 12288);
+    ASSERT_EQ(content_after_fail.size(), 12288ULL);
+    ASSERT_EQ(std::memcmp(content_after_fail.data(), test_data.data(), 12288), 0);
+
+    // Cleanup dummy filler blocks so device can be cleanly reused/closed
+    for (std::uint64_t blk : filler_blocks) {
+        fm.block_bitmap().free(blk);
+    }
+}
+
+void test_remove_safe_deletion_ordering() {
+    auto file = create_formatted_disk_with_root("build/test_fm_remove_safe.img");
+    BlockDevice dev(file->path());
+    FileManager fm(dev);
+
+    // 1. Successful file deletion & 5. Verifying inode and block resources are released correctly
+    const std::uint64_t free_blocks_init = fm.block_bitmap().count_free_blocks();
+    const std::uint64_t free_inodes_init = fm.inode_manager().count_free_inodes();
+
+    const std::uint64_t fid = fm.create(1, "safe_del.txt");
+    ASSERT_EQ(fm.inode_manager().count_free_inodes(), free_inodes_init - 1);
+
+    std::string content(10000, 'Z');
+    fm.write(fid, 0, content); // Allocates 3 blocks
+    ASSERT_EQ(fm.block_bitmap().count_free_blocks(), free_blocks_init - 3);
+
+    // Remove file
+    fm.remove(1, "safe_del.txt");
+
+    // Inode and block resources must be released
+    ASSERT_EQ(fm.block_bitmap().count_free_blocks(), free_blocks_init);
+    ASSERT_EQ(fm.inode_manager().count_free_inodes(), free_inodes_init);
+
+    // 6. Ensuring no dangling directory entries remain
+    ASSERT_THROWS(fm.directory_manager().lookup(1, "safe_del.txt"), filler::fs::EntryNotFoundError);
+    const auto entries = fm.directory_manager().list(1);
+    for (const auto& entry : entries) {
+        ASSERT_TRUE(entry.name != "safe_del.txt");
+    }
+
+    // 2. Deleting a missing file throws FileNotFoundException
+    ASSERT_THROWS(fm.remove(1, "non_existent.txt"), FileNotFoundException);
+
+    // 3. Attempting to delete a directory using rm / FileManager::remove throws FileManagerError
+    fm.directory_manager().mkdir(1, "test_dir");
+    const std::uint64_t free_blocks_with_dir = fm.block_bitmap().count_free_blocks();
+    const std::uint64_t free_inodes_with_dir = fm.inode_manager().count_free_inodes();
+
+    ASSERT_THROWS(fm.remove(1, "test_dir"), FileManagerError);
+
+    // Ensure directory entry was NOT removed and resources were NOT freed
+    ASSERT_EQ(fm.block_bitmap().count_free_blocks(), free_blocks_with_dir);
+    ASSERT_EQ(fm.inode_manager().count_free_inodes(), free_inodes_with_dir);
+    ASSERT_EQ(fm.directory_manager().lookup(1, "test_dir") > 0, true);
+
+    // 4. Failure during directory-entry removal (e.g. invalid parent)
+    ASSERT_THROWS(fm.remove(9999, "safe_del.txt"), FileManagerError);
+}
+
 // ============================================================================
 // Test Suite Runner
 // ============================================================================
@@ -555,6 +671,8 @@ int main() {
     runner.run("10. Persistence after reopening disk image", test_persistence_after_reopening);
     runner.run("11. Single indirect block support (> 64 KiB)", test_single_indirect_blocks);
     runner.run("12. Invalid operations and error handling", test_invalid_operations_and_error_handling);
+    runner.run("13. Truncate growth and allocation rollback on failure", test_truncate_growth_and_rollback);
+    runner.run("14. Safe deletion ordering and resource release", test_remove_safe_deletion_ordering);
 
     std::cout << "======================================================================\n";
     std::cout << "Test Summary: " << runner.passed << " / " << runner.total << " passed ("

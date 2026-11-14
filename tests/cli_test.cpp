@@ -28,8 +28,20 @@
 namespace {
 
 using filler::cli::Shell;
+using filler::cli::FilesystemState;
 using filler::fs::FileType;
 using filler::fs::Superblock;
+
+inline std::ostream& operator<<(std::ostream& os, FilesystemState state) {
+    switch (state) {
+        case FilesystemState::VALID: return os << "VALID";
+        case FilesystemState::UNFORMATTED: return os << "UNFORMATTED";
+        case FilesystemState::INVALID_IMAGE: return os << "INVALID_IMAGE";
+        case FilesystemState::CORRUPTED: return os << "CORRUPTED";
+        case FilesystemState::IO_ERROR: return os << "IO_ERROR";
+    }
+    return os << "UNKNOWN";
+}
 
 // ============================================================================
 // Lightweight Test Harness & Assertion Macros
@@ -256,25 +268,25 @@ void test_file_operations_write_append_cat() {
     out.str("");
     ASSERT_TRUE(shell.execute_command("write note.txt \"First line.\"", out));
     ASSERT_TRUE(shell.execute_command("cat note.txt", out));
-    ASSERT_EQ(out.str(), "First line.");
+    ASSERT_EQ(out.str(), "First line.\n");
 
     // Append text with escape newline
     out.str("");
     ASSERT_TRUE(shell.execute_command("append note.txt \"\\nSecond line.\"", out));
     ASSERT_TRUE(shell.execute_command("cat note.txt", out));
-    ASSERT_EQ(out.str(), "First line.\nSecond line.");
+    ASSERT_EQ(out.str(), "First line.\nSecond line.\n");
 
     // Overwrite file
     out.str("");
     ASSERT_TRUE(shell.execute_command("write note.txt \"Overwritten.\"", out));
     ASSERT_TRUE(shell.execute_command("cat note.txt", out));
-    ASSERT_EQ(out.str(), "Overwritten.");
+    ASSERT_EQ(out.str(), "Overwritten.\n");
 
     // Writing to a new file directly without touch first
     out.str("");
     ASSERT_TRUE(shell.execute_command("write auto.txt hello", out));
     ASSERT_TRUE(shell.execute_command("cat auto.txt", out));
-    ASSERT_EQ(out.str(), "hello");
+    ASSERT_EQ(out.str(), "hello\n");
 }
 
 void test_rm_and_rmdir() {
@@ -368,7 +380,7 @@ void test_persistence_across_sessions() {
 
         out.str("");
         ASSERT_TRUE(shell2.execute_command("cat session1/persisted.txt", out));
-        ASSERT_EQ(out.str(), "Permanent record");
+        ASSERT_EQ(out.str(), "Permanent record\n");
     }
 }
 
@@ -419,6 +431,140 @@ void test_format_undersized_image() {
     ASSERT_TRUE(out.str().find("[DIR]  check") != std::string::npos);
 }
 
+void test_filesystem_state_classification() {
+    // 1. Opening a valid formatted image
+    {
+        ScopedTestFile valid_img("build/test_state_valid.img");
+        {
+            Shell shell1(valid_img.path());
+            std::ostringstream out;
+            shell1.format_filesystem(out);
+            ASSERT_TRUE(shell1.is_formatted());
+            ASSERT_EQ(shell1.filesystem_state(), FilesystemState::VALID);
+        }
+        // Reopen existing formatted image
+        Shell shell2(valid_img.path());
+        ASSERT_TRUE(shell2.is_formatted());
+        ASSERT_EQ(shell2.filesystem_state(), FilesystemState::VALID);
+        ASSERT_TRUE(shell2.status_message().find("valid") != std::string::npos);
+        std::ostringstream out;
+        ASSERT_TRUE(shell2.execute_command("pwd", out));
+        ASSERT_EQ(out.str(), "/\n");
+    }
+
+    // 2. Opening a newly created unformatted image
+    {
+        ScopedTestFile unformatted_img("build/test_state_unformatted.img");
+        Shell shell(unformatted_img.path());
+        ASSERT_FALSE(shell.is_formatted());
+        ASSERT_EQ(shell.filesystem_state(), FilesystemState::UNFORMATTED);
+        ASSERT_TRUE(shell.status_message().find("unformatted") != std::string::npos);
+        std::ostringstream out;
+        ASSERT_TRUE(shell.execute_command("ls", out));
+        ASSERT_TRUE(out.str().find("Error: Filesystem is not formatted. Run 'format' first.") != std::string::npos);
+    }
+
+    // 3. Opening an image with an invalid magic number
+    {
+        ScopedTestFile bad_magic_img("build/test_state_bad_magic.img");
+        {
+            Shell shell(bad_magic_img.path());
+            std::ostringstream out;
+            shell.format_filesystem(out);
+        }
+        // Corrupt magic number in Block 0
+        {
+            std::fstream fs(bad_magic_img.path(), std::ios::in | std::ios::out | std::ios::binary);
+            uint32_t bad_magic = 0xDEADBEEFU;
+            fs.seekp(0);
+            fs.write(reinterpret_cast<const char*>(&bad_magic), sizeof(bad_magic));
+        }
+        Shell shell(bad_magic_img.path());
+        ASSERT_FALSE(shell.is_formatted());
+        ASSERT_EQ(shell.filesystem_state(), FilesystemState::INVALID_IMAGE);
+        ASSERT_TRUE(shell.status_message().find("unrecognized magic number") != std::string::npos);
+        std::ostringstream out;
+        ASSERT_TRUE(shell.execute_command("ls", out));
+        ASSERT_TRUE(out.str().find("unrecognized magic number") != std::string::npos);
+    }
+
+    // 4. Opening an image with an unsupported version
+    {
+        ScopedTestFile bad_ver_img("build/test_state_bad_ver.img");
+        {
+            Shell shell(bad_ver_img.path());
+            std::ostringstream out;
+            shell.format_filesystem(out);
+        }
+        // Corrupt version number in Block 0 (offset 4)
+        {
+            std::fstream fs(bad_ver_img.path(), std::ios::in | std::ios::out | std::ios::binary);
+            uint32_t bad_version = 99U;
+            fs.seekp(4);
+            fs.write(reinterpret_cast<const char*>(&bad_version), sizeof(bad_version));
+        }
+        Shell shell(bad_ver_img.path());
+        ASSERT_FALSE(shell.is_formatted());
+        ASSERT_EQ(shell.filesystem_state(), FilesystemState::INVALID_IMAGE);
+        ASSERT_TRUE(shell.status_message().find("unsupported version") != std::string::npos);
+        std::ostringstream out;
+        ASSERT_TRUE(shell.execute_command("pwd", out));
+        ASSERT_TRUE(out.str().find("unsupported version") != std::string::npos);
+    }
+
+    // 5. Opening a truncated or malformed image (non-multiple of block size)
+    {
+        ScopedTestFile malformed_img("build/test_state_malformed.img");
+        {
+            std::ofstream ofs(malformed_img.path(), std::ios::binary | std::ios::trunc);
+            std::vector<char> buf(500, 'M');
+            ofs.write(buf.data(), buf.size());
+        }
+        Shell shell(malformed_img.path());
+        ASSERT_FALSE(shell.is_formatted());
+        ASSERT_EQ(shell.filesystem_state(), FilesystemState::IO_ERROR);
+        ASSERT_TRUE(shell.status_message().find("Disk I/O") != std::string::npos);
+        std::ostringstream out;
+        ASSERT_TRUE(shell.execute_command("mkdir test", out));
+        ASSERT_TRUE(out.str().find("Disk I/O") != std::string::npos);
+    }
+
+    // 6. Simulating a disk I/O error where practical (e.g. non-existent directory path)
+    {
+        Shell shell("/non_existent_dir_99999/test.img");
+        ASSERT_FALSE(shell.is_formatted());
+        ASSERT_EQ(shell.filesystem_state(), FilesystemState::IO_ERROR);
+        ASSERT_TRUE(shell.status_message().find("Disk I/O") != std::string::npos);
+        std::ostringstream out;
+        ASSERT_TRUE(shell.execute_command("ls", out));
+        ASSERT_TRUE(out.str().find("Disk I/O") != std::string::npos);
+    }
+
+    // 7. Opening an image with corrupted filesystem metadata (valid magic & version, but invalid fields)
+    {
+        ScopedTestFile corrupted_img("build/test_state_corrupted.img");
+        {
+            Shell shell(corrupted_img.path());
+            std::ostringstream out;
+            shell.format_filesystem(out);
+        }
+        // Corrupt data region start in Block 0 (offset 104) to an out-of-range value
+        {
+            std::fstream fs(corrupted_img.path(), std::ios::in | std::ios::out | std::ios::binary);
+            uint64_t invalid_data_start = 99999999ULL;
+            fs.seekp(filler::fs::offsets::DATA_REGION_START);
+            fs.write(reinterpret_cast<const char*>(&invalid_data_start), sizeof(invalid_data_start));
+        }
+        Shell shell(corrupted_img.path());
+        ASSERT_FALSE(shell.is_formatted());
+        ASSERT_EQ(shell.filesystem_state(), FilesystemState::CORRUPTED);
+        ASSERT_TRUE(shell.status_message().find("Corrupted filesystem metadata") != std::string::npos);
+        std::ostringstream out;
+        ASSERT_TRUE(shell.execute_command("ls", out));
+        ASSERT_TRUE(out.str().find("Corrupted filesystem metadata") != std::string::npos);
+    }
+}
+
 // ============================================================================
 // Test Suite Runner
 // ============================================================================
@@ -442,6 +588,7 @@ int main() {
         {"test_persistence_across_sessions", test_persistence_across_sessions},
         {"test_interactive_repl_run", test_interactive_repl_run},
         {"test_format_undersized_image", test_format_undersized_image},
+        {"test_filesystem_state_classification", test_filesystem_state_classification},
     };
 
     std::cout << "==================================================\n";
