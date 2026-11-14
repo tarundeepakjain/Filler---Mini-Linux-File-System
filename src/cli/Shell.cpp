@@ -1,0 +1,574 @@
+#include "cli/Shell.hpp"
+
+#include "fs/Formatter.hpp"
+#include "fs/Superblock.hpp"
+
+// POSIX / C system headers
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+// Standard C++ library headers
+#include <algorithm>
+#include <cctype>
+#include <cerrno>
+#include <ctime>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+namespace filler::cli {
+
+namespace {
+
+std::string process_text_argument(const std::string& raw) {
+    if (raw.empty()) {
+        return "";
+    }
+    std::string text = raw;
+    if (text.size() >= 2 && ((text.front() == '"' && text.back() == '"') ||
+                             (text.front() == '\'' && text.back() == '\''))) {
+        text = text.substr(1, text.size() - 2);
+    }
+
+    std::string result;
+    result.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\\' && i + 1 < text.size()) {
+            char next = text[i + 1];
+            if (next == 'n') {
+                result.push_back('\n');
+                ++i;
+            } else if (next == 'r') {
+                result.push_back('\r');
+                ++i;
+            } else if (next == 't') {
+                result.push_back('\t');
+                ++i;
+            } else if (next == '\\') {
+                result.push_back('\\');
+                ++i;
+            } else if (next == '"') {
+                result.push_back('"');
+                ++i;
+            } else if (next == '\'') {
+                result.push_back('\'');
+                ++i;
+            } else {
+                result.push_back(text[i]);
+            }
+        } else {
+            result.push_back(text[i]);
+        }
+    }
+    return result;
+}
+
+bool parse_path_and_text(const std::string& args, std::string& path_out, std::string& text_out) {
+    std::size_t idx = 0;
+    while (idx < args.size() && std::isspace(static_cast<unsigned char>(args[idx]))) {
+        ++idx;
+    }
+    if (idx >= args.size()) {
+        return false;
+    }
+
+    std::string path;
+    if (args[idx] == '"' || args[idx] == '\'') {
+        char quote = args[idx++];
+        while (idx < args.size() && args[idx] != quote) {
+            path.push_back(args[idx++]);
+        }
+        if (idx < args.size() && args[idx] == quote) {
+            ++idx;
+        }
+    } else {
+        while (idx < args.size() && !std::isspace(static_cast<unsigned char>(args[idx]))) {
+            path.push_back(args[idx++]);
+        }
+    }
+
+    while (idx < args.size() && std::isspace(static_cast<unsigned char>(args[idx]))) {
+        ++idx;
+    }
+
+    std::string raw_text = (idx < args.size()) ? args.substr(idx) : "";
+    path_out = path;
+    text_out = process_text_argument(raw_text);
+    return true;
+}
+
+} // namespace
+
+Shell::Shell(const std::string& image_path)
+    : image_path_(image_path) {
+    struct stat st{};
+    if (::stat(image_path_.c_str(), &st) != 0) {
+        int fd = ::open(image_path_.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            throw std::system_error(errno, std::generic_category(), "Failed to create disk image: " + image_path_);
+        }
+        if (::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE)) != 0) {
+            int err = errno;
+            ::close(fd);
+            throw std::system_error(err, std::generic_category(), "Failed to allocate disk image size: " + image_path_);
+        }
+        ::close(fd);
+    } else if (st.st_size == 0) {
+        int fd = ::open(image_path_.c_str(), O_RDWR);
+        if (fd >= 0) {
+            (void)::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE));
+            ::close(fd);
+        }
+    }
+
+    device_ = std::make_unique<filler::storage::BlockDevice>(image_path_);
+
+    try {
+        std::vector<std::uint8_t> block0(filler::storage::BlockDevice::BLOCK_SIZE, 0);
+        device_->read_block(filler::fs::Superblock::SUPERBLOCK_BLOCK_ID, block0.data(), block0.size());
+        auto sb = filler::fs::Superblock::deserialize(block0.data(), block0.size());
+        sb.validate();
+        is_formatted_ = true;
+        init_subsystems();
+    } catch (...) {
+        is_formatted_ = false;
+    }
+}
+
+void Shell::init_subsystems() {
+    block_bitmap_ = std::make_unique<filler::fs::BlockBitmap>(*device_);
+    inode_manager_ = std::make_unique<filler::fs::InodeManager>(*device_);
+    directory_manager_ = std::make_unique<filler::fs::DirectoryManager>(*device_, *inode_manager_, *block_bitmap_);
+    file_manager_ = std::make_unique<filler::fs::FileManager>(*device_, *inode_manager_, *block_bitmap_, *directory_manager_);
+}
+
+void Shell::format_filesystem(std::ostream& out) {
+    filler::fs::Formatter::format(*device_);
+    init_subsystems();
+    directory_manager_->initialize_root();
+    current_dir_inode_ = filler::fs::Superblock::DEFAULT_ROOT_INODE;
+    current_path_ = "/";
+    is_formatted_ = true;
+    out << "Filesystem successfully formatted.\n";
+}
+
+std::uint64_t Shell::resolve_path(const std::string& path, std::string* canonical_out) {
+    if (!is_formatted_) {
+        throw std::runtime_error("Filesystem is not formatted");
+    }
+
+    if (path.empty()) {
+        if (canonical_out != nullptr) {
+            *canonical_out = current_path_;
+        }
+        return current_dir_inode_;
+    }
+
+    std::uint64_t curr_inode = current_dir_inode_;
+    std::vector<std::string> components;
+
+    if (path.front() == '/') {
+        curr_inode = filler::fs::Superblock::DEFAULT_ROOT_INODE;
+    } else {
+        std::stringstream ss(current_path_);
+        std::string seg;
+        while (std::getline(ss, seg, '/')) {
+            if (!seg.empty()) {
+                components.push_back(seg);
+            }
+        }
+    }
+
+    std::stringstream ss(path);
+    std::string token;
+    while (std::getline(ss, token, '/')) {
+        if (token.empty() || token == ".") {
+            continue;
+        }
+        if (token == "..") {
+            curr_inode = directory_manager_->lookup(curr_inode, "..");
+            if (!components.empty()) {
+                components.pop_back();
+            }
+        } else {
+            curr_inode = directory_manager_->lookup(curr_inode, token);
+            components.push_back(token);
+        }
+    }
+
+    if (canonical_out != nullptr) {
+        if (components.empty()) {
+            *canonical_out = "/";
+        } else {
+            std::string res;
+            for (const auto& comp : components) {
+                res += "/" + comp;
+            }
+            *canonical_out = res;
+        }
+    }
+
+    return curr_inode;
+}
+
+std::pair<std::string, std::string> Shell::split_path(const std::string& path) {
+    if (path.empty()) {
+        return {"", ""};
+    }
+
+    std::string trimmed = path;
+    while (trimmed.size() > 1 && trimmed.back() == '/') {
+        trimmed.pop_back();
+    }
+
+    if (trimmed == "/") {
+        return {"/", ""};
+    }
+
+    const auto last_slash = trimmed.find_last_of('/');
+    if (last_slash == std::string::npos) {
+        return {"", trimmed};
+    }
+
+    if (last_slash == 0) {
+        return {"/", trimmed.substr(1)};
+    }
+
+    return {trimmed.substr(0, last_slash), trimmed.substr(last_slash + 1)};
+}
+
+void Shell::cmd_format(std::ostream& out) {
+    format_filesystem(out);
+}
+
+void Shell::cmd_pwd(std::ostream& out) {
+    out << current_path_ << "\n";
+}
+
+void Shell::cmd_cd(const std::string& args, std::ostream& out) {
+    const std::string target = args.empty() ? "/" : args;
+    std::string canonical;
+    const std::uint64_t target_inode = resolve_path(target, &canonical);
+    const filler::fs::Inode inode = inode_manager_->get_inode(target_inode);
+    if (!inode.is_directory()) {
+        out << "Error: Not a directory: " << target << "\n";
+        return;
+    }
+    current_dir_inode_ = target_inode;
+    current_path_ = canonical;
+}
+
+void Shell::cmd_ls(const std::string& args, std::ostream& out) {
+    const std::uint64_t target_inode = args.empty() ? current_dir_inode_ : resolve_path(args);
+    const filler::fs::Inode inode = inode_manager_->get_inode(target_inode);
+    if (inode.is_directory()) {
+        const auto entries = directory_manager_->list(target_inode);
+        for (const auto& entry : entries) {
+            const filler::fs::Inode entry_inode = inode_manager_->get_inode(entry.inode_id);
+            if (entry_inode.is_directory()) {
+                out << "[DIR]  " << entry.name << "\n";
+            } else {
+                out << "[FILE] " << entry.name << " (" << entry_inode.size_bytes << " bytes)\n";
+            }
+        }
+    } else {
+        out << "[FILE] " << (args.empty() ? current_path_ : args) << " (" << inode.size_bytes << " bytes)\n";
+    }
+}
+
+void Shell::cmd_mkdir(const std::string& args, std::ostream& out) {
+    if (args.empty()) {
+        out << "Error: mkdir requires a path\n";
+        return;
+    }
+    auto [parent_path, name] = split_path(args);
+    if (name.empty()) {
+        out << "Error: Invalid directory name\n";
+        return;
+    }
+    const std::uint64_t parent_inode = parent_path.empty() ? current_dir_inode_ : resolve_path(parent_path);
+    directory_manager_->mkdir(parent_inode, name);
+}
+
+void Shell::cmd_touch(const std::string& args, std::ostream& out) {
+    if (args.empty()) {
+        out << "Error: touch requires a path\n";
+        return;
+    }
+    auto [parent_path, name] = split_path(args);
+    if (name.empty()) {
+        out << "Error: Invalid file name\n";
+        return;
+    }
+    const std::uint64_t parent_inode = parent_path.empty() ? current_dir_inode_ : resolve_path(parent_path);
+    try {
+        const std::uint64_t existing_inode = directory_manager_->lookup(parent_inode, name);
+        filler::fs::Inode inode = inode_manager_->get_inode(existing_inode);
+        inode.mtime_sec = static_cast<std::int64_t>(std::time(nullptr));
+        inode.atime_sec = inode.mtime_sec;
+        inode_manager_->update_inode(existing_inode, inode);
+    } catch (const filler::fs::EntryNotFoundError&) {
+        file_manager_->create(parent_inode, name);
+    }
+}
+
+void Shell::cmd_cat(const std::string& args, std::ostream& out) {
+    if (args.empty()) {
+        out << "Error: cat requires a path\n";
+        return;
+    }
+    const std::uint64_t file_inode = resolve_path(args);
+    const filler::fs::Inode inode = inode_manager_->get_inode(file_inode);
+    if (inode.is_directory()) {
+        out << "Error: Is a directory: " << args << "\n";
+        return;
+    }
+    if (inode.size_bytes > 0) {
+        const auto data = file_manager_->read(file_inode, 0, inode.size_bytes);
+        out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    }
+}
+
+void Shell::cmd_write(const std::string& args, std::ostream& out) {
+    std::string path, text;
+    if (!parse_path_and_text(args, path, text) || path.empty()) {
+        out << "Error: write requires a path and content\n";
+        return;
+    }
+    auto [parent_path, name] = split_path(path);
+    if (name.empty()) {
+        out << "Error: Invalid file name\n";
+        return;
+    }
+    const std::uint64_t parent_inode = parent_path.empty() ? current_dir_inode_ : resolve_path(parent_path);
+    std::uint64_t file_inode = 0;
+    try {
+        file_inode = directory_manager_->lookup(parent_inode, name);
+        const filler::fs::Inode inode = inode_manager_->get_inode(file_inode);
+        if (inode.is_directory()) {
+            out << "Error: Cannot write to directory: " << path << "\n";
+            return;
+        }
+    } catch (const filler::fs::EntryNotFoundError&) {
+        file_inode = file_manager_->create(parent_inode, name);
+    }
+
+    file_manager_->truncate(file_inode, 0);
+    if (!text.empty()) {
+        file_manager_->write(file_inode, 0, text);
+    }
+}
+
+void Shell::cmd_append(const std::string& args, std::ostream& out) {
+    std::string path, text;
+    if (!parse_path_and_text(args, path, text) || path.empty()) {
+        out << "Error: append requires a path and content\n";
+        return;
+    }
+    auto [parent_path, name] = split_path(path);
+    if (name.empty()) {
+        out << "Error: Invalid file name\n";
+        return;
+    }
+    const std::uint64_t parent_inode = parent_path.empty() ? current_dir_inode_ : resolve_path(parent_path);
+    std::uint64_t file_inode = 0;
+    try {
+        file_inode = directory_manager_->lookup(parent_inode, name);
+        const filler::fs::Inode inode = inode_manager_->get_inode(file_inode);
+        if (inode.is_directory()) {
+            out << "Error: Cannot append to directory: " << path << "\n";
+            return;
+        }
+    } catch (const filler::fs::EntryNotFoundError&) {
+        file_inode = file_manager_->create(parent_inode, name);
+    }
+
+    if (!text.empty()) {
+        file_manager_->append(file_inode, text);
+    }
+}
+
+void Shell::cmd_rm(const std::string& args, std::ostream& out) {
+    if (args.empty()) {
+        out << "Error: rm requires a path\n";
+        return;
+    }
+    auto [parent_path, name] = split_path(args);
+    if (name.empty()) {
+        out << "Error: Invalid file name\n";
+        return;
+    }
+    const std::uint64_t parent_inode = parent_path.empty() ? current_dir_inode_ : resolve_path(parent_path);
+    const std::uint64_t target_inode = directory_manager_->lookup(parent_inode, name);
+    const filler::fs::Inode inode = inode_manager_->get_inode(target_inode);
+    if (inode.is_directory()) {
+        out << "Error: Cannot remove directory with rm (use rmdir): " << name << "\n";
+        return;
+    }
+    file_manager_->remove(parent_inode, name);
+}
+
+void Shell::cmd_rmdir(const std::string& args, std::ostream& out) {
+    if (args.empty()) {
+        out << "Error: rmdir requires a path\n";
+        return;
+    }
+    auto [parent_path, name] = split_path(args);
+    if (name.empty() || name == "." || name == "..") {
+        out << "Error: Cannot remove '" << args << "'\n";
+        return;
+    }
+    const std::uint64_t parent_inode = parent_path.empty() ? current_dir_inode_ : resolve_path(parent_path);
+    directory_manager_->remove_directory(parent_inode, name);
+}
+
+void Shell::cmd_stat(const std::string& args, std::ostream& out) {
+    if (args.empty()) {
+        out << "Error: stat requires a path\n";
+        return;
+    }
+    const std::uint64_t target_inode = resolve_path(args);
+    const filler::fs::Inode inode = inode_manager_->get_inode(target_inode);
+    out << "Inode: " << inode.inode_id << "\n";
+    out << "Type: " << (inode.type == filler::fs::FileType::DIRECTORY ? "Directory" :
+                       inode.type == filler::fs::FileType::REGULAR ? "Regular File" : "Unknown") << "\n";
+    out << "Size: " << inode.size_bytes << " bytes\n";
+    out << "Blocks: " << inode.blocks_count << "\n";
+    out << "Permissions: 0" << std::oct << inode.permissions << std::dec << "\n";
+    out << "UID: " << inode.uid << ", GID: " << inode.gid << "\n";
+    out << "Direct blocks: [";
+    bool first = true;
+    for (std::size_t i = 0; i < filler::fs::Inode::DIRECT_BLOCKS_COUNT; ++i) {
+        if (inode.direct_blocks[i] != 0) {
+            if (!first) {
+                out << ", ";
+            }
+            out << i << ":" << inode.direct_blocks[i];
+            first = false;
+        }
+    }
+    out << "]\n";
+    if (inode.single_indirect != 0) {
+        out << "Single indirect: " << inode.single_indirect << "\n";
+    }
+    if (inode.double_indirect != 0) {
+        out << "Double indirect: " << inode.double_indirect << "\n";
+    }
+    out << "Access time: " << inode.atime_sec << "\n";
+    out << "Modify time: " << inode.mtime_sec << "\n";
+    out << "Change time: " << inode.ctime_sec << "\n";
+}
+
+void Shell::cmd_help(std::ostream& out) {
+    out << "Available commands:\n";
+    out << "  format               Format the disk image\n";
+    out << "  mkdir <path>         Create a directory\n";
+    out << "  touch <path>         Create an empty file\n";
+    out << "  ls [path]            List directory contents\n";
+    out << "  cd <path>            Change current directory\n";
+    out << "  pwd                  Display current directory\n";
+    out << "  cat <path>           Display file contents\n";
+    out << "  write <path> <text>  Write content to a file\n";
+    out << "  append <path> <text> Append content to a file\n";
+    out << "  rm <path>            Remove a file\n";
+    out << "  rmdir <path>         Remove an empty directory\n";
+    out << "  stat <path>          Display inode and file metadata\n";
+    out << "  help                 Display available commands\n";
+    out << "  exit                 Exit the shell\n";
+}
+
+bool Shell::execute_command(const std::string& cmd_line, std::ostream& out) {
+    std::size_t start = 0;
+    while (start < cmd_line.size() && std::isspace(static_cast<unsigned char>(cmd_line[start]))) {
+        ++start;
+    }
+    if (start >= cmd_line.size()) {
+        return true;
+    }
+
+    std::size_t end = start;
+    while (end < cmd_line.size() && !std::isspace(static_cast<unsigned char>(cmd_line[end]))) {
+        ++end;
+    }
+
+    const std::string cmd = cmd_line.substr(start, end - start);
+
+    while (end < cmd_line.size() && std::isspace(static_cast<unsigned char>(cmd_line[end]))) {
+        ++end;
+    }
+    std::string args;
+    if (end < cmd_line.size()) {
+        args = cmd_line.substr(end);
+        while (!args.empty() && std::isspace(static_cast<unsigned char>(args.back()))) {
+            args.pop_back();
+        }
+    }
+
+    if (cmd == "exit" || cmd == "quit") {
+        return false;
+    }
+
+    try {
+        if (cmd == "help") {
+            cmd_help(out);
+        } else if (cmd == "format") {
+            cmd_format(out);
+        } else {
+            if (!is_formatted_) {
+                out << "Error: Filesystem is not formatted. Run 'format' first.\n";
+                return true;
+            }
+
+            if (cmd == "pwd") {
+                cmd_pwd(out);
+            } else if (cmd == "cd") {
+                cmd_cd(args, out);
+            } else if (cmd == "ls") {
+                cmd_ls(args, out);
+            } else if (cmd == "mkdir") {
+                cmd_mkdir(args, out);
+            } else if (cmd == "touch") {
+                cmd_touch(args, out);
+            } else if (cmd == "cat") {
+                cmd_cat(args, out);
+            } else if (cmd == "write") {
+                cmd_write(args, out);
+            } else if (cmd == "append") {
+                cmd_append(args, out);
+            } else if (cmd == "rm") {
+                cmd_rm(args, out);
+            } else if (cmd == "rmdir") {
+                cmd_rmdir(args, out);
+            } else if (cmd == "stat") {
+                cmd_stat(args, out);
+            } else {
+                out << "Unknown command: " << cmd << ". Type 'help' for available commands.\n";
+            }
+        }
+    } catch (const std::exception& ex) {
+        out << "Error: " << ex.what() << "\n";
+    }
+
+    return true;
+}
+
+void Shell::run(std::istream& in, std::ostream& out) {
+    std::string line;
+    while (true) {
+        out << "filler:" << current_path_ << "> " << std::flush;
+        if (!std::getline(in, line)) {
+            break;
+        }
+        if (!execute_command(line, out)) {
+            break;
+        }
+    }
+}
+
+} // namespace filler::cli
