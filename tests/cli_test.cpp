@@ -396,6 +396,29 @@ void test_interactive_repl_run() {
     ASSERT_TRUE(repl_output.find("Hello from REPL") != std::string::npos);
 }
 
+void test_format_undersized_image() {
+    ScopedTestFile test_img("build/test_cli_undersized.img");
+    // Create an undersized image file of 65,536 bytes (16 blocks)
+    {
+        std::ofstream ofs(test_img.path(), std::ios::binary | std::ios::trunc);
+        std::vector<char> buf(65536, 0);
+        ofs.write(buf.data(), buf.size());
+    }
+
+    Shell shell(test_img.path());
+    std::ostringstream out;
+    ASSERT_TRUE(shell.execute_command("format", out));
+    ASSERT_TRUE(out.str().find("successfully formatted") != std::string::npos);
+    ASSERT_TRUE(shell.is_formatted());
+    ASSERT_EQ(shell.current_path(), "/");
+
+    // Can create directories and files
+    ASSERT_TRUE(shell.execute_command("mkdir check", out));
+    out.str("");
+    ASSERT_TRUE(shell.execute_command("ls", out));
+    ASSERT_TRUE(out.str().find("[DIR]  check") != std::string::npos);
+}
+
 // ============================================================================
 // Test Suite Runner
 // ============================================================================
@@ -418,6 +441,7 @@ int main() {
         {"test_stat_command", test_stat_command},
         {"test_persistence_across_sessions", test_persistence_across_sessions},
         {"test_interactive_repl_run", test_interactive_repl_run},
+        {"test_format_undersized_image", test_format_undersized_image},
     };
 
     std::cout << "==================================================\n";

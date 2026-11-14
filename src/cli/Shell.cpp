@@ -176,10 +176,10 @@ Shell::Shell(const std::string& image_path)
             throw std::system_error(err, std::generic_category(), "Failed to allocate disk image size: " + image_path_);
         }
         ::close(fd);
-    } else if (st.st_size == 0) {
+    } else if (st.st_size < static_cast<off_t>(DEFAULT_IMAGE_SIZE)) {
         int fd = ::open(image_path_.c_str(), O_RDWR);
         if (fd < 0) {
-            throw std::system_error(errno, std::generic_category(), "Failed to open empty disk image: " + image_path_);
+            throw std::system_error(errno, std::generic_category(), "Failed to open disk image: " + image_path_);
         }
         if (::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE)) != 0) {
             int err = errno;
@@ -211,6 +211,21 @@ void Shell::init_subsystems() {
 }
 
 void Shell::format_filesystem(std::ostream& out) {
+    if (device_->total_blocks() != filler::fs::Formatter::DEFAULT_TOTAL_BLOCKS) {
+        device_->close();
+        int fd = ::open(image_path_.c_str(), O_RDWR);
+        if (fd < 0) {
+            throw std::system_error(errno, std::generic_category(), "Failed to open disk image: " + image_path_);
+        }
+        if (::ftruncate(fd, static_cast<off_t>(DEFAULT_IMAGE_SIZE)) != 0) {
+            int err = errno;
+            ::close(fd);
+            throw std::system_error(err, std::generic_category(), "Failed to resize disk image: " + image_path_);
+        }
+        ::close(fd);
+        device_ = std::make_unique<filler::storage::BlockDevice>(image_path_);
+    }
+
     filler::fs::Formatter::format(*device_);
     init_subsystems();
     directory_manager_->initialize_root();
