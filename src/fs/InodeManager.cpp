@@ -156,7 +156,10 @@ std::uint64_t InodeManager::allocate_inode(FileType type, std::uint32_t permissi
     // Update Superblock free_inodes count and persist
     if (sb_.free_inodes > 0) {
         --sb_.free_inodes;
-        sb_.write(device_);
+        Superblock latest_sb = Superblock::read(device_);
+        latest_sb.free_inodes = sb_.free_inodes;
+        sb_.free_blocks = latest_sb.free_blocks;
+        latest_sb.write(device_);
     }
 
     next_free_inode_hint_ = candidate + 1;
@@ -253,7 +256,10 @@ void InodeManager::free_inode(std::uint64_t inode_id) {
     // Update Superblock free_inodes count and persist
     if (sb_.free_inodes < sb_.total_inodes - 2) {
         ++sb_.free_inodes;
-        sb_.write(device_);
+        Superblock latest_sb = Superblock::read(device_);
+        latest_sb.free_inodes = sb_.free_inodes;
+        sb_.free_blocks = latest_sb.free_blocks;
+        latest_sb.write(device_);
     }
 
     if (inode_id < next_free_inode_hint_) {

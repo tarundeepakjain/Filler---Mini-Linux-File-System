@@ -103,6 +103,63 @@ bool parse_path_and_text(const std::string& args, std::string& path_out, std::st
     return true;
 }
 
+bool parse_write_args(const std::string& args, std::string& path_out, bool& has_offset, std::uint64_t& offset_out, std::string& text_out) {
+    std::size_t idx = 0;
+    while (idx < args.size() && std::isspace(static_cast<unsigned char>(args[idx]))) {
+        ++idx;
+    }
+    if (idx >= args.size()) {
+        return false;
+    }
+
+    std::string path;
+    if (args[idx] == '"' || args[idx] == '\'') {
+        char quote = args[idx++];
+        while (idx < args.size() && args[idx] != quote) {
+            path.push_back(args[idx++]);
+        }
+        if (idx < args.size() && args[idx] == quote) {
+            ++idx;
+        }
+    } else {
+        while (idx < args.size() && !std::isspace(static_cast<unsigned char>(args[idx]))) {
+            path.push_back(args[idx++]);
+        }
+    }
+
+    while (idx < args.size() && std::isspace(static_cast<unsigned char>(args[idx]))) {
+        ++idx;
+    }
+
+    has_offset = false;
+    offset_out = 0;
+
+    if (idx < args.size() && std::isdigit(static_cast<unsigned char>(args[idx]))) {
+        std::size_t num_end = idx;
+        while (num_end < args.size() && std::isdigit(static_cast<unsigned char>(args[num_end]))) {
+            ++num_end;
+        }
+        std::size_t text_start = num_end;
+        while (text_start < args.size() && std::isspace(static_cast<unsigned char>(args[text_start]))) {
+            ++text_start;
+        }
+        if (text_start < args.size()) {
+            try {
+                offset_out = std::stoull(args.substr(idx, num_end - idx));
+                has_offset = true;
+                idx = text_start;
+            } catch (...) {
+                has_offset = false;
+            }
+        }
+    }
+
+    std::string raw_text = (idx < args.size()) ? args.substr(idx) : "";
+    path_out = path;
+    text_out = process_text_argument(raw_text);
+    return true;
+}
+
 } // namespace
 
 Shell::Shell(const std::string& image_path)
@@ -342,7 +399,9 @@ void Shell::cmd_cat(const std::string& args, std::ostream& out) {
 
 void Shell::cmd_write(const std::string& args, std::ostream& out) {
     std::string path, text;
-    if (!parse_path_and_text(args, path, text) || path.empty()) {
+    bool has_offset = false;
+    std::uint64_t offset = 0;
+    if (!parse_write_args(args, path, has_offset, offset, text) || path.empty()) {
         out << "Error: write requires a path and content\n";
         return;
     }
@@ -364,10 +423,59 @@ void Shell::cmd_write(const std::string& args, std::ostream& out) {
         file_inode = file_manager_->create(parent_inode, name);
     }
 
-    file_manager_->truncate(file_inode, 0);
-    if (!text.empty()) {
-        file_manager_->write(file_inode, 0, text);
+    if (!has_offset) {
+        file_manager_->truncate(file_inode, 0);
     }
+    if (!text.empty()) {
+        file_manager_->write(file_inode, offset, text);
+    }
+}
+
+void Shell::cmd_truncate(const std::string& args, std::ostream& out) {
+    std::size_t idx = 0;
+    while (idx < args.size() && std::isspace(static_cast<unsigned char>(args[idx]))) {
+        ++idx;
+    }
+    if (idx >= args.size()) {
+        out << "Error: truncate requires a path and size\n";
+        return;
+    }
+
+    std::string path;
+    if (args[idx] == '"' || args[idx] == '\'') {
+        char quote = args[idx++];
+        while (idx < args.size() && args[idx] != quote) {
+            path.push_back(args[idx++]);
+        }
+        if (idx < args.size() && args[idx] == quote) {
+            ++idx;
+        }
+    } else {
+        while (idx < args.size() && !std::isspace(static_cast<unsigned char>(args[idx]))) {
+            path.push_back(args[idx++]);
+        }
+    }
+
+    while (idx < args.size() && std::isspace(static_cast<unsigned char>(args[idx]))) {
+        ++idx;
+    }
+
+    if (idx >= args.size()) {
+        out << "Error: truncate requires a size\n";
+        return;
+    }
+
+    const std::string size_str = args.substr(idx);
+    std::uint64_t new_size = 0;
+    try {
+        new_size = std::stoull(size_str);
+    } catch (...) {
+        out << "Error: Invalid size: " << size_str << "\n";
+        return;
+    }
+
+    const std::uint64_t target_inode = resolve_path(path);
+    file_manager_->truncate(target_inode, new_size);
 }
 
 void Shell::cmd_append(const std::string& args, std::ostream& out) {
@@ -472,20 +580,21 @@ void Shell::cmd_stat(const std::string& args, std::ostream& out) {
 
 void Shell::cmd_help(std::ostream& out) {
     out << "Available commands:\n";
-    out << "  format               Format the disk image\n";
-    out << "  mkdir <path>         Create a directory\n";
-    out << "  touch <path>         Create an empty file\n";
-    out << "  ls [path]            List directory contents\n";
-    out << "  cd <path>            Change current directory\n";
-    out << "  pwd                  Display current directory\n";
-    out << "  cat <path>           Display file contents\n";
-    out << "  write <path> <text>  Write content to a file\n";
-    out << "  append <path> <text> Append content to a file\n";
-    out << "  rm <path>            Remove a file\n";
-    out << "  rmdir <path>         Remove an empty directory\n";
-    out << "  stat <path>          Display inode and file metadata\n";
-    out << "  help                 Display available commands\n";
-    out << "  exit                 Exit the shell\n";
+    out << "  format                    Format the disk image\n";
+    out << "  mkdir <path>              Create a directory\n";
+    out << "  touch <path>              Create an empty file\n";
+    out << "  ls [path]                 List directory contents\n";
+    out << "  cd <path>                 Change current directory\n";
+    out << "  pwd                       Display current directory\n";
+    out << "  cat <path>                Display file contents\n";
+    out << "  write <path> [off] <text> Write content to a file (optional byte offset)\n";
+    out << "  append <path> <text>      Append content to a file\n";
+    out << "  truncate <path> <size>    Truncate file to specified size\n";
+    out << "  rm <path>                 Remove a file\n";
+    out << "  rmdir <path>              Remove an empty directory\n";
+    out << "  stat <path>               Display inode and file metadata\n";
+    out << "  help                      Display available commands\n";
+    out << "  exit                      Exit the shell\n";
 }
 
 bool Shell::execute_command(const std::string& cmd_line, std::ostream& out) {
@@ -546,6 +655,8 @@ bool Shell::execute_command(const std::string& cmd_line, std::ostream& out) {
                 cmd_write(args, out);
             } else if (cmd == "append") {
                 cmd_append(args, out);
+            } else if (cmd == "truncate") {
+                cmd_truncate(args, out);
             } else if (cmd == "rm") {
                 cmd_rm(args, out);
             } else if (cmd == "rmdir") {

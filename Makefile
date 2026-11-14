@@ -23,8 +23,9 @@ TEST_INODE_MANAGER_BIN := $(BIN_DIR)/inode_manager_test
 TEST_DIRECTORY_MANAGER_BIN := $(BIN_DIR)/directory_manager_test
 TEST_FILE_MANAGER_BIN := $(BIN_DIR)/file_manager_test
 TEST_CLI_BIN := $(BIN_DIR)/cli_test
+TEST_INTEGRATION_BIN := $(BIN_DIR)/integration_test
 
-.PHONY: all clean dirs run test test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager test_directory_manager test_file_manager test_cli
+.PHONY: all clean dirs run test test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager test_directory_manager test_file_manager test_cli test_integration
 
 # Default target
 all: dirs $(BIN_DIR)/filler
@@ -148,5 +149,21 @@ test_cli: dirs
 		-o $(TEST_CLI_BIN)
 	./$(TEST_CLI_BIN)
 
+# Build and run End-to-End Integration test suite
+test_integration: dirs
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) \
+		src/storage/BlockDevice.cpp \
+		src/fs/Superblock.cpp \
+		src/fs/Formatter.cpp \
+		src/fs/BlockBitmap.cpp \
+		src/fs/Inode.cpp \
+		src/fs/InodeManager.cpp \
+		src/fs/DirectoryManager.cpp \
+		src/fs/FileManager.cpp \
+		src/cli/Shell.cpp \
+		tests/integration_test.cpp \
+		-o $(TEST_INTEGRATION_BIN)
+	./$(TEST_INTEGRATION_BIN)
+
 # Run all test suites
-test: test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager test_directory_manager test_file_manager test_cli
+test: test_block_device test_superblock test_formatter test_block_bitmap test_inode_manager test_directory_manager test_file_manager test_cli test_integration

@@ -40,6 +40,11 @@ public:
     [[nodiscard]] bool is_formatted() const noexcept { return is_formatted_; }
     [[nodiscard]] std::uint64_t current_dir_inode() const noexcept { return current_dir_inode_; }
     [[nodiscard]] const std::string& current_path() const noexcept { return current_path_; }
+    [[nodiscard]] filler::storage::BlockDevice* device() noexcept { return device_.get(); }
+    [[nodiscard]] filler::fs::BlockBitmap* block_bitmap() noexcept { return block_bitmap_.get(); }
+    [[nodiscard]] filler::fs::InodeManager* inode_manager() noexcept { return inode_manager_.get(); }
+    [[nodiscard]] filler::fs::DirectoryManager* directory_manager() noexcept { return directory_manager_.get(); }
+    [[nodiscard]] filler::fs::FileManager* file_manager() noexcept { return file_manager_.get(); }
 
     // Path resolution helper
     [[nodiscard]] std::uint64_t resolve_path(const std::string& path, std::string* canonical_out = nullptr);
@@ -69,6 +74,7 @@ private:
     void cmd_cat(const std::string& args, std::ostream& out);
     void cmd_write(const std::string& args, std::ostream& out);
     void cmd_append(const std::string& args, std::ostream& out);
+    void cmd_truncate(const std::string& args, std::ostream& out);
     void cmd_rm(const std::string& args, std::ostream& out);
     void cmd_rmdir(const std::string& args, std::ostream& out);
     void cmd_stat(const std::string& args, std::ostream& out);

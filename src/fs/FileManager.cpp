@@ -75,6 +75,7 @@ std::uint64_t FileManager::get_or_allocate_block(Inode& inode, std::uint64_t log
 
     if (logical_block < SINGLE_INDIRECT_LIMIT) {
         const std::uint64_t index = logical_block - DIRECT_BLOCKS;
+        bool newly_allocated_table = false;
         if (inode.single_indirect == 0) {
             if (!allocate) {
                 return 0;
@@ -84,6 +85,7 @@ std::uint64_t FileManager::get_or_allocate_block(Inode& inode, std::uint64_t log
             device_.write_block(indir_blk, zero_buf, sizeof(zero_buf));
             inode.single_indirect = indir_blk;
             ++inode.blocks_count;
+            newly_allocated_table = true;
         }
 
         alignas(8) std::uint8_t table_buf[BlockDevice::BLOCK_SIZE];
@@ -96,7 +98,18 @@ std::uint64_t FileManager::get_or_allocate_block(Inode& inode, std::uint64_t log
             return 0;
         }
 
-        const std::uint64_t new_blk = block_bitmap_.allocate();
+        std::uint64_t new_blk = 0;
+        try {
+            new_blk = block_bitmap_.allocate();
+        } catch (...) {
+            if (newly_allocated_table) {
+                block_bitmap_.free(inode.single_indirect);
+                inode.single_indirect = 0;
+                if (inode.blocks_count > 0) --inode.blocks_count;
+            }
+            throw;
+        }
+
         alignas(8) std::uint8_t zero_buf[BlockDevice::BLOCK_SIZE] = {0};
         device_.write_block(new_blk, zero_buf, sizeof(zero_buf));
 
@@ -111,6 +124,7 @@ std::uint64_t FileManager::get_or_allocate_block(Inode& inode, std::uint64_t log
         const std::uint64_t l1_idx = rel / POINTERS_PER_BLOCK;
         const std::uint64_t l2_idx = rel % POINTERS_PER_BLOCK;
 
+        bool newly_allocated_l1 = false;
         if (inode.double_indirect == 0) {
             if (!allocate) {
                 return 0;
@@ -120,22 +134,34 @@ std::uint64_t FileManager::get_or_allocate_block(Inode& inode, std::uint64_t log
             device_.write_block(dbl_blk, zero_buf, sizeof(zero_buf));
             inode.double_indirect = dbl_blk;
             ++inode.blocks_count;
+            newly_allocated_l1 = true;
         }
 
         alignas(8) std::uint8_t l1_buf[BlockDevice::BLOCK_SIZE];
         device_.read_block(inode.double_indirect, l1_buf, sizeof(l1_buf));
         std::uint64_t l2_blk = read_u64_le(l1_buf + (l1_idx * 8));
 
+        bool newly_allocated_l2 = false;
         if (l2_blk == 0) {
             if (!allocate) {
                 return 0;
             }
-            l2_blk = block_bitmap_.allocate();
+            try {
+                l2_blk = block_bitmap_.allocate();
+            } catch (...) {
+                if (newly_allocated_l1) {
+                    block_bitmap_.free(inode.double_indirect);
+                    inode.double_indirect = 0;
+                    if (inode.blocks_count > 0) --inode.blocks_count;
+                }
+                throw;
+            }
             alignas(8) std::uint8_t zero_buf[BlockDevice::BLOCK_SIZE] = {0};
             device_.write_block(l2_blk, zero_buf, sizeof(zero_buf));
             write_u64_le(l1_buf + (l1_idx * 8), l2_blk);
             device_.write_block(inode.double_indirect, l1_buf, sizeof(l1_buf));
             ++inode.blocks_count;
+            newly_allocated_l2 = true;
         }
 
         alignas(8) std::uint8_t l2_buf[BlockDevice::BLOCK_SIZE];
@@ -148,7 +174,24 @@ std::uint64_t FileManager::get_or_allocate_block(Inode& inode, std::uint64_t log
             return 0;
         }
 
-        const std::uint64_t new_blk = block_bitmap_.allocate();
+        std::uint64_t new_blk = 0;
+        try {
+            new_blk = block_bitmap_.allocate();
+        } catch (...) {
+            if (newly_allocated_l2) {
+                block_bitmap_.free(l2_blk);
+                write_u64_le(l1_buf + (l1_idx * 8), 0);
+                device_.write_block(inode.double_indirect, l1_buf, sizeof(l1_buf));
+                if (inode.blocks_count > 0) --inode.blocks_count;
+            }
+            if (newly_allocated_l1) {
+                block_bitmap_.free(inode.double_indirect);
+                inode.double_indirect = 0;
+                if (inode.blocks_count > 0) --inode.blocks_count;
+            }
+            throw;
+        }
+
         alignas(8) std::uint8_t zero_buf[BlockDevice::BLOCK_SIZE] = {0};
         device_.write_block(new_blk, zero_buf, sizeof(zero_buf));
 
@@ -446,21 +489,35 @@ std::size_t FileManager::write(std::uint64_t inode_id, std::uint64_t offset, con
     std::size_t bytes_written = 0;
     alignas(8) std::uint8_t block_buf[BlockDevice::BLOCK_SIZE];
 
-    while (bytes_written < size) {
-        const std::uint64_t current_offset = offset + bytes_written;
-        const std::uint64_t logical_block = current_offset / BlockDevice::BLOCK_SIZE;
-        const std::size_t block_offset = current_offset % BlockDevice::BLOCK_SIZE;
-        const std::size_t chunk = std::min(size - bytes_written, BlockDevice::BLOCK_SIZE - block_offset);
+    try {
+        while (bytes_written < size) {
+            const std::uint64_t current_offset = offset + bytes_written;
+            const std::uint64_t logical_block = current_offset / BlockDevice::BLOCK_SIZE;
+            const std::size_t block_offset = current_offset % BlockDevice::BLOCK_SIZE;
+            const std::size_t chunk = std::min(size - bytes_written, BlockDevice::BLOCK_SIZE - block_offset);
 
-        const std::uint64_t phys_block = get_or_allocate_block(inode, logical_block, true);
-        if (chunk < BlockDevice::BLOCK_SIZE) {
-            device_.read_block(phys_block, block_buf, sizeof(block_buf));
+            const std::uint64_t phys_block = get_or_allocate_block(inode, logical_block, true);
+            if (chunk < BlockDevice::BLOCK_SIZE) {
+                device_.read_block(phys_block, block_buf, sizeof(block_buf));
+            }
+
+            std::memcpy(block_buf + block_offset, src + bytes_written, chunk);
+            device_.write_block(phys_block, block_buf, sizeof(block_buf));
+
+            bytes_written += chunk;
         }
-
-        std::memcpy(block_buf + block_offset, src + bytes_written, chunk);
-        device_.write_block(phys_block, block_buf, sizeof(block_buf));
-
-        bytes_written += chunk;
+    } catch (...) {
+        if (bytes_written > 0) {
+            if (offset + bytes_written > inode.size_bytes) {
+                inode.size_bytes = offset + bytes_written;
+            }
+            const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch()).count();
+            inode.mtime_sec = now;
+            inode.ctime_sec = now;
+            inode_manager_.update_inode(inode_id, inode);
+        }
+        throw;
     }
 
     if (offset + size > inode.size_bytes) {

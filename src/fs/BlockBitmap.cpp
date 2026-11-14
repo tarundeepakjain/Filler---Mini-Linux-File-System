@@ -124,7 +124,10 @@ std::uint64_t BlockBitmap::allocate() {
     // Update Superblock free_blocks and persist to disk
     if (sb_.free_blocks > 0) {
         --sb_.free_blocks;
-        sb_.write(device_);
+        Superblock latest_sb = Superblock::read(device_);
+        latest_sb.free_blocks = sb_.free_blocks;
+        sb_.free_inodes = latest_sb.free_inodes;
+        latest_sb.write(device_);
     }
 
     next_free_hint_ = candidate + 1;
@@ -164,7 +167,10 @@ void BlockBitmap::free(std::uint64_t block_id) {
     // Update Superblock free_blocks and persist to disk
     if (sb_.free_blocks < sb_.data_region_blocks) {
         ++sb_.free_blocks;
-        sb_.write(device_);
+        Superblock latest_sb = Superblock::read(device_);
+        latest_sb.free_blocks = sb_.free_blocks;
+        sb_.free_inodes = latest_sb.free_inodes;
+        latest_sb.write(device_);
     }
 
     // Update allocation search hint to reuse this newly freed block
@@ -223,7 +229,10 @@ void BlockBitmap::initialize() {
 
     // Reset free_blocks in superblock and persist
     sb_.free_blocks = sb_.data_region_blocks;
-    sb_.write(device_);
+    Superblock latest_sb = Superblock::read(device_);
+    latest_sb.free_blocks = sb_.free_blocks;
+    sb_.free_inodes = latest_sb.free_inodes;
+    latest_sb.write(device_);
 
     next_free_hint_ = sb_.data_region_start;
 }
