@@ -567,6 +567,137 @@ void test_truncate_growth_and_rollback() {
     for (std::uint64_t blk : filler_blocks) {
         fm.block_bitmap().free(blk);
     }
+
+    // 7. Failure during growth through an existing single-indirect table
+    {
+        const std::uint64_t fid_s = fm.create(1, "single_indir_test.txt");
+        // Direct blocks = 16 (0..15). Create a file with 18 blocks so single_indirect is allocated
+        // and contains 2 block pointers (indices 0 and 1).
+        fm.truncate(fid_s, 18 * BlockDevice::BLOCK_SIZE);
+        const Inode s_before = fm.stat(fid_s);
+        ASSERT_EQ(s_before.blocks_count, 19ULL); // 16 direct + 1 single_indirect table + 2 data blocks
+        ASSERT_TRUE(s_before.single_indirect != 0);
+
+        // Write test pattern across the 18 blocks
+        std::string s_data(18 * BlockDevice::BLOCK_SIZE, 'S');
+        for (std::size_t i = 0; i < s_data.size(); ++i) {
+            s_data[i] = static_cast<char>('a' + (i % 26));
+        }
+        fm.write(fid_s, 0, s_data);
+
+        // Read single indirect block from disk
+        alignas(8) std::uint8_t table_before[BlockDevice::BLOCK_SIZE];
+        dev.read_block(s_before.single_indirect, table_before, sizeof(table_before));
+        uint64_t ptr0_before = 0, ptr1_before = 0, ptr2_before = 0;
+        std::memcpy(&ptr0_before, table_before + 0, 8);
+        std::memcpy(&ptr1_before, table_before + 8, 8);
+        std::memcpy(&ptr2_before, table_before + 16, 8);
+        ASSERT_TRUE(ptr0_before != 0);
+        ASSERT_TRUE(ptr1_before != 0);
+        ASSERT_EQ(ptr2_before, 0ULL);
+
+        // Exhaust blocks to exactly 2 free blocks
+        std::vector<std::uint64_t> filler;
+        while (fm.block_bitmap().count_free_blocks() > 2) {
+            filler.push_back(fm.block_bitmap().allocate());
+        }
+        ASSERT_EQ(fm.block_bitmap().count_free_blocks(), 2ULL);
+        const std::uint64_t free_before_s = fm.block_bitmap().count_free_blocks();
+
+        // Request 5 more blocks: 18 blocks -> 23 blocks (needs 5, only 2 free)
+        ASSERT_THROWS(fm.truncate(fid_s, 23 * BlockDevice::BLOCK_SIZE), filler::fs::BlockBitmapError);
+
+        // Free blocks restored
+        ASSERT_EQ(fm.block_bitmap().count_free_blocks(), free_before_s);
+
+        // Inode metadata restored
+        const Inode s_after = fm.stat(fid_s);
+        ASSERT_EQ(s_after.size_bytes, s_before.size_bytes);
+        ASSERT_EQ(s_after.blocks_count, s_before.blocks_count);
+        ASSERT_EQ(s_after.single_indirect, s_before.single_indirect);
+
+        // Table on disk restored: entry 2 must STILL be 0, NOT pointing to a freed block!
+        alignas(8) std::uint8_t table_after[BlockDevice::BLOCK_SIZE];
+        dev.read_block(s_after.single_indirect, table_after, sizeof(table_after));
+        uint64_t ptr0_after = 0, ptr1_after = 0, ptr2_after = 0;
+        std::memcpy(&ptr0_after, table_after + 0, 8);
+        std::memcpy(&ptr1_after, table_after + 8, 8);
+        std::memcpy(&ptr2_after, table_after + 16, 8);
+        ASSERT_EQ(ptr0_after, ptr0_before);
+        ASSERT_EQ(ptr1_after, ptr1_before);
+        ASSERT_EQ(ptr2_after, 0ULL);
+
+        // Content unchanged
+        auto read_s = fm.read(fid_s, 0, 18 * BlockDevice::BLOCK_SIZE);
+        ASSERT_EQ(read_s.size(), s_data.size());
+        ASSERT_EQ(std::memcmp(read_s.data(), s_data.data(), s_data.size()), 0);
+
+        for (uint64_t b : filler) {
+            fm.block_bitmap().free(b);
+        }
+    }
+
+    // 8. Failure during growth through an existing double-indirect table
+    {
+        const std::uint64_t fid_d = fm.create(1, "dbl_indir_test.txt");
+        // 16 direct + 512 single indirect = 528.
+        // 530 blocks reaches into double indirect L2 block (entries 0 and 1).
+        fm.truncate(fid_d, 530 * BlockDevice::BLOCK_SIZE);
+        const Inode d_before = fm.stat(fid_d);
+        ASSERT_TRUE(d_before.double_indirect != 0);
+
+        // Read L1 block to get L2 block ID
+        alignas(8) std::uint8_t l1_buf[BlockDevice::BLOCK_SIZE];
+        dev.read_block(d_before.double_indirect, l1_buf, sizeof(l1_buf));
+        uint64_t l2_blk = 0;
+        std::memcpy(&l2_blk, l1_buf, 8);
+        ASSERT_TRUE(l2_blk != 0);
+
+        // Read L2 block
+        alignas(8) std::uint8_t l2_buf_before[BlockDevice::BLOCK_SIZE];
+        dev.read_block(l2_blk, l2_buf_before, sizeof(l2_buf_before));
+        uint64_t l2_ptr0 = 0, l2_ptr1 = 0, l2_ptr2 = 0;
+        std::memcpy(&l2_ptr0, l2_buf_before + 0, 8);
+        std::memcpy(&l2_ptr1, l2_buf_before + 8, 8);
+        std::memcpy(&l2_ptr2, l2_buf_before + 16, 8);
+        ASSERT_TRUE(l2_ptr0 != 0);
+        ASSERT_TRUE(l2_ptr1 != 0);
+        ASSERT_EQ(l2_ptr2, 0ULL);
+
+        // Exhaust to 2 free blocks
+        std::vector<std::uint64_t> filler;
+        while (fm.block_bitmap().count_free_blocks() > 2) {
+            filler.push_back(fm.block_bitmap().allocate());
+        }
+        const std::uint64_t free_before_d = fm.block_bitmap().count_free_blocks();
+
+        // Request 5 more blocks (530 -> 535)
+        ASSERT_THROWS(fm.truncate(fid_d, 535 * BlockDevice::BLOCK_SIZE), filler::fs::BlockBitmapError);
+
+        // Verify free blocks restored
+        ASSERT_EQ(fm.block_bitmap().count_free_blocks(), free_before_d);
+
+        // Inode metadata restored
+        const Inode d_after = fm.stat(fid_d);
+        ASSERT_EQ(d_after.size_bytes, d_before.size_bytes);
+        ASSERT_EQ(d_after.blocks_count, d_before.blocks_count);
+        ASSERT_EQ(d_after.double_indirect, d_before.double_indirect);
+
+        // Verify L2 block on disk was restored and entry 2 is 0 (no freed block referenced)
+        alignas(8) std::uint8_t l2_buf_after[BlockDevice::BLOCK_SIZE];
+        dev.read_block(l2_blk, l2_buf_after, sizeof(l2_buf_after));
+        uint64_t l2_ptr0_after = 0, l2_ptr1_after = 0, l2_ptr2_after = 0;
+        std::memcpy(&l2_ptr0_after, l2_buf_after + 0, 8);
+        std::memcpy(&l2_ptr1_after, l2_buf_after + 8, 8);
+        std::memcpy(&l2_ptr2_after, l2_buf_after + 16, 8);
+        ASSERT_EQ(l2_ptr0_after, l2_ptr0);
+        ASSERT_EQ(l2_ptr1_after, l2_ptr1);
+        ASSERT_EQ(l2_ptr2_after, 0ULL);
+
+        for (uint64_t b : filler) {
+            fm.block_bitmap().free(b);
+        }
+    }
 }
 
 void test_remove_safe_deletion_ordering() {
@@ -616,6 +747,83 @@ void test_remove_safe_deletion_ordering() {
 
     // 4. Failure during directory-entry removal (e.g. invalid parent)
     ASSERT_THROWS(fm.remove(9999, "safe_del.txt"), FileManagerError);
+
+    // 7. Genuine failure injection during directory-entry removal
+    {
+        class FailingDirectoryManager : public filler::fs::DirectoryManager {
+        public:
+            using filler::fs::DirectoryManager::DirectoryManager;
+            bool inject_remove_failure{false};
+
+            void remove_entry(std::uint64_t parent_inode_id, const std::string& name) override {
+                if (inject_remove_failure) {
+                    throw filler::fs::DirectoryManagerError("Injected failure during directory entry removal");
+                }
+                filler::fs::DirectoryManager::remove_entry(parent_inode_id, name);
+            }
+        };
+
+        filler::fs::InodeManager im(dev);
+        filler::fs::BlockBitmap bm(dev);
+        FailingDirectoryManager fdm(dev, im, bm);
+        FileManager fm_inject(dev, im, bm, fdm);
+
+        const std::uint64_t free_b_start = bm.count_free_blocks();
+        const std::uint64_t free_i_start = im.count_free_inodes();
+
+        const std::uint64_t fid_fail = fm_inject.create(1, "fail_del.txt");
+        std::string fail_data(10000, 'F');
+        fm_inject.write(fid_fail, 0, fail_data); // Allocates 3 blocks
+
+        const std::uint64_t free_b_after_write = bm.count_free_blocks();
+        const std::uint64_t free_i_after_write = im.count_free_inodes();
+
+        // Inject removal failure
+        fdm.inject_remove_failure = true;
+
+        ASSERT_THROWS(fm_inject.remove(1, "fail_del.txt"), FileManagerError);
+
+        // Verify:
+        // 1. Directory entry was NOT unlinked / still exists in parent directory
+        ASSERT_EQ(fdm.lookup(1, "fail_del.txt"), fid_fail);
+
+        // 2. Inode was NOT prematurely deallocated
+        ASSERT_TRUE(im.is_inode_allocated(fid_fail));
+        ASSERT_EQ(im.count_free_inodes(), free_i_after_write);
+
+        // 3. File data blocks were NOT prematurely deallocated
+        ASSERT_EQ(bm.count_free_blocks(), free_b_after_write);
+
+        // 4. File data is completely intact
+        auto read_fail = fm_inject.read(fid_fail, 0, 10000);
+        ASSERT_EQ(read_fail.size(), fail_data.size());
+        ASSERT_EQ(std::memcmp(read_fail.data(), fail_data.data(), fail_data.size()), 0);
+
+        // Turn off failure injection and verify clean removal succeeds
+        fdm.inject_remove_failure = false;
+        fm_inject.remove(1, "fail_del.txt");
+        ASSERT_EQ(bm.count_free_blocks(), free_b_start);
+        ASSERT_EQ(im.count_free_inodes(), free_i_start);
+
+        /*
+         * Note on Orphan-Resource Risk without Journaling:
+         * In a filesystem without write-ahead logging or journaling (like Filler), operations
+         * spanning multiple metadata blocks (directory entry, inode bitmap, block bitmap)
+         * cannot achieve hardware-level atomicity across sudden power failure or kernel panics.
+         *
+         * By unlinking the directory entry BEFORE deallocating the inode and data blocks:
+         * - If directory entry removal fails (as tested above), all file resources remain
+         *   fully allocated, tracked, and accessible. No data is lost.
+         * - If a crash occurs AFTER the directory entry is removed but BEFORE the inode/blocks
+         *   are returned to the free bitmaps, those blocks and inode become "orphaned"
+         *   (allocated in bitmaps, but not referenced in any directory path).
+         * - This is the standard Unix filesystem design trade-off (e.g. classical ext2/UFS):
+         *   orphaned resources cause a temporary space leak that an offline filesystem checker
+         *   (fsck) can safely reclaim into lost+found or free bitmaps, whereas freeing blocks
+         *   first would risk severe corruption (dangling directory pointers referencing
+         *   reallocated blocks of another file).
+         */
+    }
 }
 
 // ============================================================================

@@ -563,6 +563,51 @@ void test_filesystem_state_classification() {
         ASSERT_TRUE(shell.execute_command("ls", out));
         ASSERT_TRUE(out.str().find("Corrupted filesystem metadata") != std::string::npos);
     }
+
+    // 8. Opening an image with erased magic number (0) but existing metadata
+    {
+        ScopedTestFile erased_magic_img("build/test_state_erased_magic.img");
+        {
+            Shell shell(erased_magic_img.path());
+            std::ostringstream out;
+            shell.format_filesystem(out);
+        }
+        // Zero out only magic number (4 bytes at offset 0)
+        {
+            std::fstream fs(erased_magic_img.path(), std::ios::in | std::ios::out | std::ios::binary);
+            uint32_t zero_magic = 0;
+            fs.seekp(0);
+            fs.write(reinterpret_cast<const char*>(&zero_magic), sizeof(zero_magic));
+        }
+        Shell shell(erased_magic_img.path());
+        ASSERT_FALSE(shell.is_formatted());
+        ASSERT_EQ(shell.filesystem_state(), FilesystemState::CORRUPTED);
+        ASSERT_TRUE(shell.status_message().find("magic number is zero") != std::string::npos);
+        std::ostringstream out;
+        ASSERT_TRUE(shell.execute_command("ls", out));
+        ASSERT_TRUE(out.str().find("Corrupted filesystem") != std::string::npos);
+    }
+
+    // 9. Opening an image with completely wiped block 0, but bitmap data present
+    {
+        ScopedTestFile wiped_b0_img("build/test_state_wiped_b0.img");
+        {
+            Shell shell(wiped_b0_img.path());
+            std::ostringstream out;
+            shell.format_filesystem(out);
+        }
+        // Zero out entire block 0
+        {
+            std::fstream fs(wiped_b0_img.path(), std::ios::in | std::ios::out | std::ios::binary);
+            std::vector<char> zero_block(4096, 0);
+            fs.seekp(0);
+            fs.write(zero_block.data(), zero_block.size());
+        }
+        Shell shell(wiped_b0_img.path());
+        ASSERT_FALSE(shell.is_formatted());
+        ASSERT_EQ(shell.filesystem_state(), FilesystemState::CORRUPTED);
+        ASSERT_TRUE(shell.status_message().find("Corrupted filesystem") != std::string::npos);
+    }
 }
 
 // ============================================================================

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstring>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
@@ -25,6 +26,15 @@
 namespace filler::cli {
 
 namespace {
+
+inline bool is_block_all_zeros(const std::uint8_t* data, std::size_t size) noexcept {
+    for (std::size_t i = 0; i < size; ++i) {
+        if (data[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
 
 inline std::uint32_t read_u32_le(const std::uint8_t* src) noexcept {
     std::uint32_t val = 0;
@@ -229,8 +239,40 @@ void Shell::inspect_filesystem() {
     const std::uint32_t magic = read_u32_le(block0.data() + filler::fs::offsets::MAGIC);
     const std::uint32_t version = read_u32_le(block0.data() + filler::fs::offsets::VERSION);
 
-    // Case 2: Unformatted or newly created disk image (magic == 0)
+    // Case 2: Unformatted / newly created disk image vs existing image with erased magic
     if (magic == 0) {
+        const bool block0_all_zeros = is_block_all_zeros(block0.data(), block0.size());
+        if (!block0_all_zeros) {
+            // Magic is 0, but other fields in block 0 are non-zero -> magic was erased/corrupted
+            fs_state_ = FilesystemState::CORRUPTED;
+            status_message_ = "Corrupted filesystem: superblock magic number is zero/missing on an image with existing metadata.";
+            return;
+        }
+
+        // Even if block 0 is all zeros, check if block 1 (block bitmap) or block 2 (inode bitmap) contains existing data
+        std::vector<std::uint8_t> check_buf(filler::storage::BlockDevice::BLOCK_SIZE, 0);
+        bool existing_data_found = false;
+        try {
+            device_->read_block(1, check_buf.data(), check_buf.size());
+            if (!is_block_all_zeros(check_buf.data(), check_buf.size())) {
+                existing_data_found = true;
+            } else {
+                device_->read_block(2, check_buf.data(), check_buf.size());
+                if (!is_block_all_zeros(check_buf.data(), check_buf.size())) {
+                    existing_data_found = true;
+                }
+            }
+        } catch (...) {
+            // Ignore read errors here
+        }
+
+        if (existing_data_found) {
+            fs_state_ = FilesystemState::CORRUPTED;
+            status_message_ = "Corrupted filesystem: superblock is erased/empty, but existing filesystem structures are present.";
+            return;
+        }
+
+        // Genuinely blank / fresh all-zero image
         fs_state_ = FilesystemState::UNFORMATTED;
         status_message_ = "Filesystem is unformatted. Run 'format' to initialize.";
         return;

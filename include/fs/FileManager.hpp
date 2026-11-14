@@ -90,8 +90,26 @@ private:
     filler::fs::BlockBitmap& block_bitmap_;
     filler::fs::DirectoryManager& directory_manager_;
 
+    struct TruncateRollbackContext {
+        std::vector<std::uint64_t> newly_allocated_blocks;
+        std::vector<std::pair<std::uint64_t, std::vector<std::uint8_t>>> existing_block_backups;
+
+        void record_existing_block(filler::storage::BlockDevice& dev, std::uint64_t block_id) {
+            if (block_id == 0) return;
+            for (std::uint64_t b : newly_allocated_blocks) {
+                if (b == block_id) return;
+            }
+            for (const auto& p : existing_block_backups) {
+                if (p.first == block_id) return;
+            }
+            std::vector<std::uint8_t> buf(filler::storage::BlockDevice::BLOCK_SIZE);
+            dev.read_block(block_id, buf.data(), buf.size());
+            existing_block_backups.emplace_back(block_id, std::move(buf));
+        }
+    };
+
     std::uint64_t get_or_allocate_block(Inode& inode, std::uint64_t logical_block, bool allocate,
-                                        std::vector<std::uint64_t>* newly_allocated = nullptr);
+                                        TruncateRollbackContext* rollback_ctx = nullptr);
     void free_logical_block(Inode& inode, std::uint64_t logical_block);
     void free_all_blocks(Inode& inode);
 };

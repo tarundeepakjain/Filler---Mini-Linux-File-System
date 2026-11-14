@@ -54,6 +54,8 @@ public:
                      filler::fs::InodeManager& inode_manager,
                      filler::fs::BlockBitmap& block_bitmap);
 
+    virtual ~DirectoryManager() = default;
+
     // Initializes root directory (inode 1) with '.' and '..' entries
     void initialize_root();
 
@@ -76,7 +78,7 @@ public:
     void add_entry(std::uint64_t parent_inode_id, std::uint64_t inode_id, FileType type, const std::string& name);
 
     // Removes an entry from parent_inode_id by name.
-    void remove_entry(std::uint64_t parent_inode_id, const std::string& name);
+    virtual void remove_entry(std::uint64_t parent_inode_id, const std::string& name);
 
     // Accessors
     [[nodiscard]] filler::fs::InodeManager& inode_manager() noexcept { return inode_manager_; }
